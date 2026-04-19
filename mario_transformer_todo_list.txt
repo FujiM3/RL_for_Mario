@@ -1,0 +1,92 @@
+MiniMind -> Mario Transformer 项目 To Do（F:\code\minimind_for_rl）
+
+目标：
+将当前以文本自回归为核心的 MiniMind 架构改造为可在 Super Mario 环境中训练与推理的 Transformer 智能体（支持训练、评估、可视化回放）。
+
+阶段 0：基线梳理（1-2 天）
+1. 盘点现有模块
+   - model/model_minimind.py：抽离可复用 Transformer block（Attention/FFN/Norm）
+   - trainer/*.py：确认可复用训练框架（优化器、日志、checkpoint、分布式）
+2. 明确 Mario 任务定义
+   - 动作空间：离散动作集合（如 noop/right/right+jump 等）
+   - 观测空间：原始 RGB 或灰度下采样帧 + 历史堆叠
+   - 训练目标：行为克隆(BC) + RL 微调（PPO/GRPO 风格）
+3. 输出设计文档（简版）
+   - 输入/输出张量定义
+   - 数据流与训练流
+
+阶段 1：环境与数据管线（2-4 天）
+1. 新增 Mario 环境封装
+   - 新建 envs/mario_env.py（Gymnasium + NES 接口）
+   - 封装 reset/step/render/seed，统一返回格式
+2. 观测预处理
+   - resize + grayscale + frame stack
+   - 可选：reward clipping、frame skip
+3. 轨迹采集器
+   - 新建 dataset/mario_dataset.py
+   - 支持采集 (obs, action, reward, done, info) 并落盘
+4. 数据格式定义
+   - 推荐 npz/parquet：episode 级存储 + 元数据（score、x_pos、time）
+
+阶段 2：模型改造为 Mario Transformer（3-5 天）
+1. 新建配置类
+   - model/model_mario_transformer.py
+   - MarioConfig：obs_shape、n_actions、context_len、hidden_size、n_layers、n_heads
+2. 输入编码器
+   - 图像 patch embedding 或 CNN stem + 线性投影
+   - 时间步编码（positional embedding / RoPE）
+3. 主干 Transformer
+   - 复用 MiniMind block，移除文本 token 依赖（vocab/bos/eos）
+4. 策略头与价值头
+   - policy head：输出动作 logits
+   - value head：输出 V(s) 供 PPO/优势估计
+5. 推理接口
+   - act(obs, deterministic=False) -> action
+
+阶段 3：训练器实现（4-7 天）
+1. BC 预训练脚本
+   - trainer/train_mario_bc.py
+   - 监督学习目标：cross entropy(action)
+2. RL 训练脚本（推荐 PPO）
+   - trainer/train_mario_ppo.py
+   - 实现 GAE、clip objective、entropy bonus、value loss
+3. checkpoint 与恢复
+   - 对齐现有 lm_checkpoint 习惯，保存 model/optimizer/scheduler/step
+4. 日志系统
+   - 记录 episode reward、length、win rate、x_pos、loss 分量
+
+阶段 4：评估与可视化（2-3 天）
+1. 评估脚本
+   - eval_mario.py：固定随机种子，多回合平均分
+2. 录像导出
+   - 保存 mp4/gif 到 outputs/videos
+3. 对比基线
+   - random policy / rule-based / BC-only / BC+PPO
+
+阶段 5：工程化与稳定性（2-3 天）
+1. 配置管理
+   - scripts 下新增训练启动脚本（单卡/多卡）
+2. 依赖更新
+   - requirements.txt 增加 gymnasium、nes-py、gym-super-mario-bros（或兼容版本）
+3. 健壮性检查
+   - NaN 检测、梯度裁剪、动作越界保护、环境异常重置
+4. 文档补充
+   - README 增加快速开始与训练示例命令
+
+里程碑验收标准
+M1：能跑通随机策略环境交互并稳定采样（无崩溃）
+M2：BC 训练 loss 可下降，离线验证动作准确率提升
+M3：PPO 训练后平均 reward 明显高于随机策略
+M4：可导出录像，且能复现实验（固定 seed）
+
+建议优先级（按执行顺序）
+P0：环境封装 + 数据采集 + MarioConfig + policy/value head
+P1：BC 训练闭环 + 评估脚本
+P2：PPO 强化学习 + 可视化回放 + 工程化
+
+首周可执行清单（可直接开工）
+1. 创建 envs/mario_env.py 与 dataset/mario_dataset.py
+2. 创建 model/model_mario_transformer.py（先最小可运行版本）
+3. 创建 trainer/train_mario_bc.py，先在小数据集过拟合验证
+4. 创建 eval_mario.py，打通单回合推理与得分统计
+5. 补齐 requirements 依赖并记录安装命令

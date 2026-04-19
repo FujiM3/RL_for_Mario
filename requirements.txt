@@ -29,3 +29,7 @@ einops==0.8.1
 swanlab==0.6.8
 torch==2.6.0
 torchvision==0.21.0
+gym==0.26.2
+gym-super-mario-bros==7.4.0
+nes-py==8.2.1
+opencv-python==4.10.0.84

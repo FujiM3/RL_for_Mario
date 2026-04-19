@@ -171,6 +171,10 @@
 5. 关卡配额控制：
    - `--min_per_level`：每关最低采样配额
    - `--max_per_level`：每关最高采样配额（防止热门关卡过采样）
+6. `x_pos` cap 估计模式（`--cap_mode`）：
+   - `full`：启动时对全部关卡做一次 greedy probe 后再采集
+   - `fast`：跳过 probe，直接使用 `--default_cap_x`
+   - `ondemand`：仅在某关第一次被采样时才估计该关 cap（降低冷启动开销）
 
 推荐命令（示例）：
 
@@ -181,8 +185,17 @@
   --epsilon_min 0.00 `
   --epsilon_max 0.25 `
   --gate_ratio 0.70 `
+  --cap_mode ondemand `
   --min_per_level 5 `
   --max_per_level 25 `
   --max_steps 4000 `
   --output_path dataset\aligned_greedy\random_level_eps_rollouts_500.pkl
 ```
+
+## 10. 项目清理（本轮）
+
+- 已清理 `dataset\aligned_greedy` 下的临时 smoke 产物（`*_smoke.pkl`）。
+- 保留用于复现与对齐验证的正式数据：
+  - `default_profile_100eps_after_fix.pkl`
+  - `default_profile_1_2_100eps_after_fix.pkl`
+  - `default_profile_2_1_100eps_after_fix.pkl`
