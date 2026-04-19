@@ -153,3 +153,36 @@
 - “官方权重不行”不是根因。
 - 真实根因是**推理网络实现与原始 PPO 网络不一致**（多了 ReLU）。
 - 修复后，主工程在 legacy 对齐配置下可稳定复现通关能力，并已在多关卡上验证。
+
+---
+
+## 9. 新增随机关卡并发采集脚本（多样性增强）
+
+新增脚本：
+- `scripts/mario/collect_random_level_eps_rollouts.py`
+
+能力：
+1. 每条 rollout 随机选择关卡及对应模型（自动扫描 `PPO_trained_models`）。
+2. 每条 rollout 从 `[epsilon_min, epsilon_max]`（默认 `[0, 0.25]`）随机采样 epsilon 执行 epsilon-greedy。
+3. 多进程并发采集（`--num_workers`）。
+4. 混合采样策略：
+   - `gate_ratio` 比例执行“随机 `x_pos` 后开始记轨迹”（默认 70%）
+   - 剩余比例保留完整轨迹（默认 30%）
+5. 关卡配额控制：
+   - `--min_per_level`：每关最低采样配额
+   - `--max_per_level`：每关最高采样配额（防止热门关卡过采样）
+
+推荐命令（示例）：
+
+```powershell
+.\DT_env\Scripts\python.exe scripts\mario\collect_random_level_eps_rollouts.py `
+  --total_episodes 500 `
+  --num_workers 8 `
+  --epsilon_min 0.00 `
+  --epsilon_max 0.25 `
+  --gate_ratio 0.70 `
+  --min_per_level 5 `
+  --max_per_level 25 `
+  --max_steps 4000 `
+  --output_path dataset\aligned_greedy\random_level_eps_rollouts_500.pkl
+```
