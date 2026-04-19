@@ -4,9 +4,11 @@
 import argparse
 import atexit
 import os
+import pickle
 import random
 import re
 import sys
+import uuid
 import warnings
 from collections import defaultdict
 from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
@@ -233,6 +235,21 @@ def worker_init(cfg: Dict[str, Any]):
     atexit.register(_close_worker_envs)
 
 
+def resolve_runtime_device(device_arg: str, num_workers: int) -> str:
+    if device_arg == "cpu":
+        return "cpu"
+    if device_arg == "cuda":
+        if not torch.cuda.is_available():
+            raise RuntimeError("CUDA requested but torch.cuda.is_available() is False.")
+        if num_workers > 1:
+            print("[Perf] device=cuda with num_workers>1 may cause GPU contention across worker processes.")
+        return "cuda"
+    if num_workers > 1:
+        print("[Perf] device=auto with multi-process collection -> using CPU workers to avoid GPU contention.")
+        return "cpu"
+    return "cuda" if torch.cuda.is_available() else "cpu"
+
+
 def collect_one_episode(task: Dict[str, Any]) -> Dict[str, Any]:
     cfg = _WORKER_CFG
     task_id = int(task["task_id"])
@@ -346,8 +363,9 @@ def collect_one_episode(task: Dict[str, Any]) -> Dict[str, Any]:
     ep_return = float(np.sum(episode["rewards"]))
     ep_len = int(len(episode["actions"]))
     ep_clear = bool(np.any(episode["flag_gets"]))
-    return {
-        "episode": episode,
+    accepted = bool(ep_return >= cfg["min_return"] and ep_len >= cfg["min_length"])
+    result = {
+        "accepted": accepted,
         "source": {
             "model_path": model_path,
             "env_id": env_id,
@@ -362,6 +380,22 @@ def collect_one_episode(task: Dict[str, Any]) -> Dict[str, Any]:
             "flag_get": ep_clear,
         },
     }
+    # Only transfer large trajectory arrays across process boundary when the episode is kept.
+    if accepted:
+        if bool(cfg.get("spill_accepted_episode", False)):
+            spill_dir = str(cfg.get("spill_dir", "")).strip()
+            if not spill_dir:
+                raise RuntimeError("spill_accepted_episode is enabled but spill_dir is empty.")
+            os.makedirs(spill_dir, exist_ok=True)
+            spill_path = os.path.join(
+                spill_dir,
+                f"episode_t{task_id:08d}_p{os.getpid()}_{uuid.uuid4().hex[:10]}.pkl",
+            )
+            atomic_pickle_dump(episode, spill_path)
+            result["episode_file"] = spill_path
+        else:
+            result["episode"] = episode
+    return result
 
 
 def main():
@@ -391,10 +425,29 @@ def main():
     parser.add_argument("--max_silent_steps", type=int, default=1200)
     parser.add_argument("--max_stagnant_steps", type=int, default=250)
     parser.add_argument("--cap_probe_steps", type=int, default=5000)
-    parser.add_argument("--cap_mode", type=str, choices=["full", "fast", "ondemand"], default="full")
+    parser.add_argument("--cap_mode", type=str, choices=["full", "fast", "ondemand"], default="ondemand")
     parser.add_argument("--fast_start", action="store_true", help="Skip per-level cap probing and use default_cap_x.")
     parser.add_argument("--default_cap_x", type=int, default=3200)
     parser.add_argument("--device", type=str, choices=["cpu", "cuda", "auto"], default="auto")
+    parser.add_argument(
+        "--ipc_mode",
+        type=str,
+        choices=["auto", "memory", "spill"],
+        default="auto",
+        help="Episode transfer mode between workers and parent process.",
+    )
+    parser.add_argument(
+        "--spill_dir",
+        type=str,
+        default="",
+        help="Directory for temporary spill files when ipc_mode=spill.",
+    )
+    parser.add_argument(
+        "--shard_size",
+        type=int,
+        default=0,
+        help="If >0, write accepted episodes to shard files to reduce memory peak.",
+    )
     args = parser.parse_args()
 
     if args.total_episodes <= 0:
@@ -419,6 +472,8 @@ def main():
         raise ValueError("--cap_probe_steps must be > 0")
     if args.default_cap_x <= 0:
         raise ValueError("--default_cap_x must be > 0")
+    if args.shard_size < 0:
+        raise ValueError("--shard_size must be >= 0")
     if not (0.0 <= args.epsilon_min <= 1.0 and 0.0 <= args.epsilon_max <= 1.0):
         raise ValueError("epsilon_min/epsilon_max must be in [0,1]")
     if args.epsilon_min > args.epsilon_max:
@@ -442,9 +497,31 @@ def main():
         )
     if args.max_per_level > 0 and args.min_per_level > args.max_per_level:
         raise ValueError("--min_per_level cannot exceed --max_per_level")
-    device = "cuda" if (args.device == "auto" and torch.cuda.is_available()) else args.device
-    if device == "auto":
-        device = "cpu"
+    device = resolve_runtime_device(args.device, args.num_workers)
+    ipc_mode = args.ipc_mode
+    if ipc_mode == "auto":
+        ipc_mode = "spill" if args.num_workers > 1 else "memory"
+    if ipc_mode == "spill" and args.num_workers <= 1:
+        print("[Perf] ipc_mode=spill ignored in single-worker mode; fallback to memory.")
+        ipc_mode = "memory"
+    spill_enabled = ipc_mode == "spill"
+    spill_dir = ""
+    if spill_enabled:
+        if args.spill_dir.strip():
+            spill_dir = os.path.abspath(args.spill_dir)
+        else:
+            out_dir = os.path.dirname(os.path.abspath(args.output_path))
+            spill_dir = os.path.join(out_dir, f".episode_spill_{uuid.uuid4().hex[:10]}")
+        os.makedirs(spill_dir, exist_ok=True)
+        print(f"[Perf] worker spill enabled: {spill_dir}")
+    use_shards = args.shard_size > 0
+    shard_dir = ""
+    if use_shards:
+        base_name = os.path.splitext(os.path.basename(args.output_path))[0]
+        out_dir = os.path.dirname(os.path.abspath(args.output_path))
+        shard_dir = os.path.join(out_dir, f"{base_name}_shards")
+        os.makedirs(shard_dir, exist_ok=True)
+        print(f"[Perf] shard sink enabled: shard_size={args.shard_size}, shard_dir={shard_dir}")
 
     cap_mode = "fast" if args.fast_start else args.cap_mode
     print(f"Catalog size: {len(catalog)} levels, workers={args.num_workers}, device={device}, cap_mode={cap_mode}")
@@ -485,13 +562,47 @@ def main():
         "gate_min_x": args.gate_min_x,
         "gate_max_x": args.gate_max_x,
         "fallback_cap_x": args.gate_max_x,
+        "min_return": float(args.min_return),
+        "min_length": int(args.min_length),
+        "spill_accepted_episode": spill_enabled,
+        "spill_dir": spill_dir,
         "device": device,
         "expected_act_dim": len(get_action_set(args.action_type)),
     }
 
     submitted = 0
+    kept_count = 0
     accepted_by_level = {lvl: 0 for lvl in levels}
     pending_by_level = {lvl: 0 for lvl in levels}
+    shard_files: List[str] = []
+    shard_counts: List[int] = []
+    shard_episode_buf: List[Dict[str, np.ndarray]] = []
+    shard_source_buf: List[Dict[str, Any]] = []
+
+    def flush_shard_buffer(force: bool = False) -> None:
+        nonlocal shard_episode_buf, shard_source_buf
+        if not use_shards:
+            return
+        if not shard_episode_buf:
+            return
+        if (not force) and len(shard_episode_buf) < args.shard_size:
+            return
+        shard_index = len(shard_files) + 1
+        shard_path = os.path.join(shard_dir, f"episodes_shard_{shard_index:06d}.pkl")
+        shard_payload = {
+            "metadata": {
+                "collector_type": "random_level_random_epsilon_multiprocess_mixed_gate_shard",
+                "shard_index": shard_index,
+                "episodes_in_shard": len(shard_episode_buf),
+            },
+            "episodes": shard_episode_buf,
+            "episode_sources": shard_source_buf,
+        }
+        atomic_pickle_dump(shard_payload, shard_path)
+        shard_files.append(shard_path)
+        shard_counts.append(len(shard_episode_buf))
+        shard_episode_buf = []
+        shard_source_buf = []
 
     def pick_level_for_task() -> Optional[str]:
         eligible = [
@@ -527,12 +638,13 @@ def main():
         return int(args.default_cap_x)
 
     def consume_result(result: Dict[str, Any]) -> None:
-        episode = result["episode"]
+        nonlocal kept_count
         src = result["source"]
         lvl = src["level"]
         ep_return = float(src["return"])
         ep_len = int(src["length"])
         ep_clear = bool(src["flag_get"])
+        accepted = bool(result.get("accepted", False))
 
         level_stats[lvl]["count"] += 1
         level_stats[lvl]["returns"].append(ep_return)
@@ -540,18 +652,35 @@ def main():
         if ep_clear:
             level_stats[lvl]["clear"] += 1
 
-        if ep_return >= args.min_return and ep_len >= args.min_length:
+        if accepted:
+            episode = result.get("episode")
+            if episode is None:
+                episode_file = result.get("episode_file")
+                if episode_file is None:
+                    raise RuntimeError("Worker marked accepted episode but did not return payload.")
+                with open(episode_file, "rb") as f:
+                    episode = pickle.load(f)
+                try:
+                    os.remove(episode_file)
+                except OSError:
+                    pass
             level_stats[lvl]["accepted"] += 1
             accepted_by_level[lvl] += 1
-            episodes.append(episode)
-            episode_sources.append(src)
+            kept_count += 1
+            if use_shards:
+                shard_episode_buf.append(episode)
+                shard_source_buf.append(src)
+                flush_shard_buffer(force=False)
+            else:
+                episodes.append(episode)
+                episode_sources.append(src)
             pbar.update(1)
-            pbar.set_postfix(kept=f"{len(episodes)}", lvl=lvl, eps=f"{src['epsilon']:.3f}", gate=src["use_gate"])
+            pbar.set_postfix(kept=f"{kept_count}", lvl=lvl, eps=f"{src['epsilon']:.3f}", gate=src["use_gate"])
 
     pbar = tqdm(total=args.total_episodes, desc="Collecting random-level rollouts", dynamic_ncols=True)
     if args.num_workers == 1:
         worker_init(worker_cfg)
-        while len(episodes) < args.total_episodes:
+        while kept_count < args.total_episodes:
             selected_level = pick_level_for_task()
             if selected_level is None:
                 raise RuntimeError("No schedulable levels left under current min/max per-level constraints.")
@@ -580,7 +709,7 @@ def main():
                 pending_by_level[selected_level] += 1
                 submitted += 1
 
-            while len(episodes) < args.total_episodes:
+            while kept_count < args.total_episodes:
                 if not pending:
                     raise RuntimeError("No schedulable levels left under current min/max per-level constraints.")
                 done_set, pending = wait(pending, return_when=FIRST_COMPLETED)
@@ -590,7 +719,7 @@ def main():
                     result = fut.result()
                     consume_result(result)
 
-                    if len(episodes) < args.total_episodes:
+                    if kept_count < args.total_episodes:
                         selected_level = pick_level_for_task()
                         if selected_level is not None:
                             selected_cap = get_level_cap(selected_level)
@@ -602,11 +731,26 @@ def main():
                             future_level[fut] = selected_level
                             pending_by_level[selected_level] += 1
                             submitted += 1
-                if len(episodes) >= args.total_episodes:
+                if kept_count >= args.total_episodes:
                     for fut in pending:
                         fut.cancel()
                     break
     pbar.close()
+    flush_shard_buffer(force=True)
+    if spill_enabled:
+        try:
+            if os.path.isdir(spill_dir):
+                for name in os.listdir(spill_dir):
+                    path = os.path.join(spill_dir, name)
+                    if os.path.isfile(path):
+                        try:
+                            os.remove(path)
+                        except OSError:
+                            pass
+                if len(os.listdir(spill_dir)) == 0:
+                    os.rmdir(spill_dir)
+        except OSError:
+            pass
 
     serializable_level_stats: Dict[str, Dict[str, Any]] = {}
     for lvl in sorted(level_stats.keys()):
@@ -647,18 +791,35 @@ def main():
         "default_cap_x": int(args.default_cap_x),
         "device": device,
         "catalog_size": len(catalog),
-        "episodes_kept": len(episodes),
+        "episodes_kept": kept_count,
         "episodes_attempted": submitted,
+        "ipc_mode": ipc_mode,
+        "spill_enabled": bool(spill_enabled),
+        "shard_size": int(args.shard_size),
+        "sharded_output": bool(use_shards),
+        "shard_count": len(shard_files),
         "sampling_mix": {"gate_after_xpos": args.gate_ratio, "full_trajectory": 1.0 - args.gate_ratio},
     }
 
-    payload = {
-        "metadata": metadata,
-        "episodes": episodes[: args.total_episodes],
-        "episode_sources": episode_sources[: args.total_episodes],
-        "level_caps": level_caps,
-        "level_stats": serializable_level_stats,
-    }
+    if use_shards:
+        payload = {
+            "metadata": metadata,
+            "episodes": [],
+            "episode_sources": [],
+            "level_caps": level_caps,
+            "level_stats": serializable_level_stats,
+            "shard_dir": shard_dir,
+            "shard_files": shard_files,
+            "shard_counts": shard_counts,
+        }
+    else:
+        payload = {
+            "metadata": metadata,
+            "episodes": episodes[: args.total_episodes],
+            "episode_sources": episode_sources[: args.total_episodes],
+            "level_caps": level_caps,
+            "level_stats": serializable_level_stats,
+        }
     atomic_pickle_dump(payload, args.output_path)
 
     print("\n=== Level Stats ===")
@@ -669,7 +830,11 @@ def main():
             f"clear_ratio={s['clear_ratio']:.3f}, avg_return={s['avg_return']:.2f}, avg_length={s['avg_length']:.2f}"
         )
     print(f"\nSaved dataset to: {args.output_path}")
-    print(f"Episodes kept: {len(payload['episodes'])}")
+    if use_shards:
+        print(f"Episodes kept: {kept_count}")
+        print(f"Shards written: {len(shard_files)}, shard_dir={shard_dir}")
+    else:
+        print(f"Episodes kept: {len(payload['episodes'])}")
 
 
 if __name__ == "__main__":

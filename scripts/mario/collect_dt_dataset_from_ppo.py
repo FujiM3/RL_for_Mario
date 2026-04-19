@@ -564,7 +564,7 @@ def main():
                     continue
 
                 # Collecting phase transition append.
-                trackers[i].obs.append(obs_for_storage(np.array(current_obs).copy()))
+                trackers[i].obs.append(obs_for_storage(current_obs))
                 trackers[i].actions.append(int(actions[i]))
                 trackers[i].rewards.append(float(rewards[i]))
                 trackers[i].terminateds.append(bool(done))
