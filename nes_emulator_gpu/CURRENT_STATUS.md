@@ -135,18 +135,27 @@ Phase 6: PPO集成           [          ]   0% ⏳
 **预计时间**: 3-4周  
 **当前进度**: 83% (Task 2.1-2.5完成)
 
-### 最新进展 (Task 2.5完成: NMI和定时系统 + 渲染优化)
+### 最新进展 (Task 2.5完成 + 5轮渲染优化)
 
-✅ **渲染优化完成**: 2.2×性能提升
+✅ **渲染优化完成**: 2.57×性能提升！
 1. **Tile-Based背景渲染**:
    - 内存读取: 184,320 → 23,040 per frame (-87.5%)
    - 测试执行: 90ms → 40ms (2.25× faster)
 2. **Sprite Pattern预取**:
    - CHR读取: 491,520 → 3,840 per frame (-99.2%)
    - 调用减少: 256 → 8 per scanline (-97%)
-3. **综合影响**: ~2.5×渲染速度提升，测试套件90ms→41ms
-4. **文档**: tile_based_rendering_optimization.md (230行)
-5. **文档**: sprite_pattern_prefetch_optimization.md (299行)
+3. **Palette Lookup镜像**:
+   - 位运算: 61,440 → 0 per frame (-100%)
+   - 测试执行: 41ms → 37ms (1.11× faster)
+4. **Memory Access快速路径**:
+   - 添加read_nametable_fast(), read_palette_fast()
+   - 绕过ppu_read()完整地址解码
+5. **tick()热路径优化**:
+   - 早期返回、位运算替代算术
+   - 消除58万次算术 + 16万次分支/帧
+   - 测试执行: 37ms → 35ms (1.06× faster)
+6. **综合影响**: 90ms → 35ms = **2.57×总加速** ✅
+7. **优化文档**: 1,256行（4份详细分析）
 
 ✅ **Task 2.5完成**: NMI和定时系统
 - 262条扫描线精确帧结构 (0-261)
