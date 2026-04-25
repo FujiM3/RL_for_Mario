@@ -115,6 +115,8 @@ private:
         uint8_t tile;
         uint8_t attr;
         uint8_t oam_index;
+        // OPTIMIZATION: Pre-fetched pattern data (avoid CHR reads during rendering)
+        uint16_t pattern;  // Pre-computed pattern data for current scanline
     };
     ActiveSprite active_sprites[8];
     int active_sprite_count;

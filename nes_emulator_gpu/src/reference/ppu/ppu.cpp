@@ -588,6 +588,7 @@ void PPU::render_pixel_from_v(int screen_x, int screen_y) {
 
 void PPU::evaluate_sprites() {
     // Find sprites visible on current scanline
+    // OPTIMIZATION: Also pre-fetch pattern data to avoid CHR reads during rendering
     active_sprite_count = 0;
     
     for (int i = 0; i < 64; i++) {
@@ -606,6 +607,13 @@ void PPU::evaluate_sprites() {
                 active_sprites[active_sprite_count].tile = oam[i * 4 + 1];
                 active_sprites[active_sprite_count].attr = oam[i * 4 + 2];
                 active_sprites[active_sprite_count].oam_index = i;
+                
+                // PRE-FETCH: Get pattern data for this scanline NOW
+                // This avoids CHR reads during rendering (saves 8 reads per sprite)
+                bool vflip = active_sprites[active_sprite_count].attr & 0x80;
+                active_sprites[active_sprite_count].pattern = 
+                    get_sprite_pattern(active_sprites[active_sprite_count].tile, row, vflip);
+                
                 active_sprite_count++;
             } else {
                 // Sprite overflow (simplified - just set flag)
@@ -660,12 +668,8 @@ void PPU::render_sprite_pixel(int x, int y) {
             dx = 7 - dx;
         }
         
-        // Vertical flip
-        bool vflip = spr.attr & 0x80;
-        int dy = y - (spr.y + 1);
-        
-        // Get pattern data
-        uint16_t pattern = get_sprite_pattern(spr.tile, dy, vflip);
+        // OPTIMIZATION: Use pre-fetched pattern data (no CHR read or get_sprite_pattern call!)
+        uint16_t pattern = spr.pattern;
         
         // Extract pixel value (2 bits)
         uint8_t lo_bit = (pattern >> (15 - dx)) & 1;
