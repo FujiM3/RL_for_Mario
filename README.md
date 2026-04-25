@@ -178,3 +178,17 @@ python scripts\mario\visualize_ppo_rollout.py `
    - `--ipc_mode spill`（worker 先落盘再回传路径）
    - `--shard_size 128`（父进程按分片落盘，避免单文件大内存累积）
    - `--spill_direct_shard 1`（默认开启；在 spill+shard 模式下由 worker 按 `shard_size` 直接写 shard，减少父进程读回+重写）
+
+
+---
+
+## 🆕 GPU NES模拟器子项目
+
+为解决PPO在线训练的CPU瓶颈，本项目正在开发GPU原生NES模拟器。
+
+**详见**: [`nes_emulator_gpu/README.md`](nes_emulator_gpu/README.md)
+
+**目标**: 将训练速度从 252 sps 提升至 30,000+ sps (100倍)
+
+**当前状态**: Phase 0 已完成，Phase 1 准备中
+

@@ -32,7 +32,8 @@ import multiprocessing as mp
 from collections import deque
 from typing import List, Tuple, Optional, Dict, Any
 
-import gym
+import gymnasium as gym
+import gymnasium
 import gym_super_mario_bros
 from gym_super_mario_bros.actions import SIMPLE_MOVEMENT
 from nes_py.wrappers import JoypadSpace
@@ -63,6 +64,42 @@ class _OldAPIAdapter(gym.Wrapper):
     def step(self, action):
         obs, reward, done, info = self.env.step(action)
         return obs, reward, done, False, info
+
+
+class _GymToGymnasiumWrapper(gymnasium.Env):
+    """
+    将 nes_py JoypadSpace（旧版 gym.Env）桥接为 gymnasium.Env。
+    让我们的所有 wrapper 能正常套在上面。
+    """
+
+    def __init__(self, env):
+        self._env = env
+        self.observation_space = gymnasium.spaces.Box(
+            low=env.observation_space.low,
+            high=env.observation_space.high,
+            shape=env.observation_space.shape,
+            dtype=env.observation_space.dtype,
+        )
+        self.action_space = gymnasium.spaces.Discrete(env.action_space.n)
+
+    def reset(self, **kwargs):
+        obs = self._env.reset()
+        if isinstance(obs, tuple):
+            return obs[0], {}
+        return obs, {}
+
+    def step(self, action):
+        result = self._env.step(action)
+        if len(result) == 5:
+            return result
+        obs, reward, done, info = result
+        return obs, reward, done, False, info
+
+    def close(self):
+        self._env.close()
+
+    def render(self, **kwargs):
+        return self._env.render(**kwargs)
 
 
 # ── 单环境 Wrappers ───────────────────────────────────────────────────────────
@@ -224,13 +261,13 @@ def make_mario_env(
     Returns:
         已包装的 gym.Env，obs_space=(4,84,84) uint8，act_space=Discrete(7)
     """
-    env_id = f"SuperMarioBros-{world}-{stage}-v0"
+    env_id = f"SuperMarioBros-{world}-{stage}-v3"
 
-    # gym_super_mario_bros.make() 内部会套 gym.TimeLimit（gym 0.26.2）
-    # TimeLimit 期望底层返回 5 值，但 nes_py 返回 4 值 → 用 unwrapped 绕开
-    raw = gym_super_mario_bros.make(env_id).unwrapped
-    env = _OldAPIAdapter(raw)          # 旧→新 API 转换，从最底层开始
-    env = JoypadSpace(env, SIMPLE_MOVEMENT)
+    # v3 底层仍然是 nes_py，JoypadSpace 继承自旧版 gym.Env
+    # 需要用 GymToGymnasiumWrapper 桥接到 gymnasium.Env
+    raw = gym_super_mario_bros.make(env_id, apply_api_compatibility=True)
+    joypad = JoypadSpace(raw.unwrapped, SIMPLE_MOVEMENT)
+    env = _GymToGymnasiumWrapper(joypad)
     env = SkipFrame(env, skip=4)
     env = GrayScaleObservation(env)
     env = ResizeObservation(env, shape=(84, 84))

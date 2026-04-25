@@ -1,0 +1,41 @@
+# ROM files (copyright protection)
+*.nes
+*.rom
+
+# Build artifacts
+*.o
+*.so
+*.a
+*.out
+*.exe
+
+# CUDA artifacts
+*.cubin
+*.ptx
+*.fatbin
+
+# Python bindings
+*.pyc
+__pycache__/
+*.egg-info/
+build/
+dist/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*~
+
+# Profiling
+*.nsys-rep
+*.ncu-rep
+*.qdrep
+
+# Temporary
+tmp/
+temp/
+*.log
+
+# Test outputs
+tests/output/

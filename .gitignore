@@ -20,35 +20,38 @@ ENV/
 DT_env/
 legacy_ppo_env/
 
-# --- Model checkpoints / weights ---
+# --- Model checkpoints (训练中间产物) ---
 checkpoints/
 PPO_trained_models/
-*.pth
-*.pt
-*.bin
-*.safetensors
-*.onnx
+trainer/out/
+# BUT: trained_models/ 中的最终模型不忽略（已训练好的重要权重）
 
-# --- Training logs / experiment outputs ---
-runs/
+# --- Temporary / logs ---
+*.log
 logs/
-wandb/
-tensorboard/
-events.out.tfevents*
+tmp/
+temp/
 
-# --- Dataset / rollout artifacts ---
-dataset/*
-!dataset/README.md
-!dataset/.gitattributes
-*.pkl
-*.npz
-*.npy
-*.jsonl
-
-# --- Editor / OS temp ---
-.DS_Store
-Thumbs.db
+# --- IDE ---
 .vscode/
 .idea/
 *.swp
-*.tmp
+*~
+
+# --- OS ---
+.DS_Store
+Thumbs.db
+
+# --- Data ---
+*.zip
+*.tar.gz
+data/raw/
+data/cache/
+
+# --- NES模拟器特定（在子项目也有.gitignore） ---
+nes_emulator_gpu/tests/roms/*.nes
+nes_emulator_gpu/tests/roms/*.rom
+nes_emulator_gpu/build/
+*.cubin
+*.ptx
+*.fatbin

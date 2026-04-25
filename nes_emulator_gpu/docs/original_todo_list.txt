@@ -1,0 +1,494 @@
+================================================================================
+                    GPU 原生 NES 模拟器 + Mario RL 训练
+                          项目 TODO LIST 与技术规划
+================================================================================
+
+【文档目的】
+本文档是给后续接手的 AI / 工程师的完整工作指引。本项目目标是构建一个
+能在 GPU 上批量并行运行的 NES 模拟器，使 Super Mario Bros 强化学习训练
+完全摆脱 CPU 瓶颈。这是研究级别的工程项目，预估总工作量 3-6 个月。
+开始之前请通读全文，理解每个阶段的目标、风险和验收标准。
+
+
+================================================================================
+【背景与上下文】
+================================================================================
+
+# 项目历史
+- 已完成：Decision Transformer 离线预训练（145万步专家数据，已收敛）
+- 当前问题：PPO online fine-tune 受限于 CPU 模拟器（nes_py 单线程）
+  实测速度 252 steps/sec，10M 步训练需要 12 小时，且 GPU 利用率仅 11%
+- 现有数据集：可能不可用（训练换服务器后丢失，需要时可重新采集）
+- 现有权重：DT checkpoint (dt_mario_pro_hs512_L6_best.pth) 仍可用
+  state_encoder 是标准 Nature DQN CNN，hidden_size=512
+
+# 硬件环境
+- GPU：NVIDIA Tesla V100 PCIe 32GB
+- CUDA：cu118
+- PyTorch：当前版本
+- 操作系统：Linux
+
+# 路径规则
+- 所有重的读写任务放在 /work/ 下，禁止在 /home/ 下放数据或缓存
+- uv 缓存目录：/work/xmyan/.uv_cache
+- 项目根目录：/work/xmyan/RL_for_Mario
+
+
+================================================================================
+【为什么选这条路线及风险声明】
+================================================================================
+
+# 为什么选 GPU 原生模拟器
+- 现状：CPU bound，GPU 利用率 11%，无论如何调参都无法突破 ~600 sps
+- 替代方案对比：
+  * stable-retro（CPU 优化）：~600 sps，仍是 CPU bound
+  * World Model：精度不够，专家数据分布偏斜
+  * 多机分布式：硬件成本高
+  * GPU 原生模拟器：理论上 10000+ sps，但实现极难
+- 用户明确接受高难度大改方案
+
+# 已知风险（必须告知用户）
+1. NES 是 6502 CPU + 自定义 PPU 图形芯片，模拟器实现不简单
+   现有完整 CPU 实现：fceux、nestopia、quickerNES 等开源项目（C/C++）
+2. CUDA 上模拟分支密集代码会面临严重的 warp divergence 问题
+3. 学术界有相关工作但都是 Atari，没有成熟的 NES CUDA 模拟器
+4. 开发周期 3-6 个月，期间无法用此路线训练 Mario
+5. 即使做出来，单 GPU 性能可能不到预期（warp divergence 损失）
+
+# 放弃条件
+出现以下任意情况，应停止此路线，回退到 stable-retro 或其他方案：
+- Phase 3 单实例 GPU 模拟器无法在 1 个月内做出来
+- Phase 4 批量并行后实测速度不超过 stable-retro 的 2 倍
+- Phase 6 集成训练后发现 obs 与原 nes_py 有显著差异，DT 权重无法迁移
+
+
+================================================================================
+【整体技术路线】
+================================================================================
+
+策略：先做 CPU 参考实现，再移植 GPU，最后批量并行
+原则：每个 phase 都有可独立验证的产出，不一次性写完才测试
+
+Phase 0：技术调研与方案确认（1 周）
+Phase 1：CPU 参考实现 - 6502 CPU 模拟（2-3 周）
+Phase 2：CPU 参考实现 - PPU 图形渲染（3-4 周）
+Phase 3：单实例 GPU 移植（4-6 周）
+Phase 4：批量并行 GPU 模拟器（3-4 周）
+Phase 5：Python / gymnasium 接口封装（1 周）
+Phase 6：集成到 PPO 训练并对比验证（1-2 周）
+
+
+================================================================================
+【Phase 0：技术调研与方案确认】 (1 周)
+================================================================================
+
+## 任务 0.1：调研已有 GPU 模拟器实现
+- [ ] 搜索学术论文：「GPU emulator」「CUDA NES」「parallel Atari」
+- [ ] 重点查看以下项目的源码和论文：
+  * EnvPool（C++ 多线程，参考其架构）
+  * cuLE（CUDA Atari Learning Environment，最相关参考）
+  * MadronaMP / WarpDrive（GPU RL 框架）
+  * Brax（Google 的 GPU 物理引擎）
+- [ ] 输出：调研报告 docs/gpu_emulator_research.md
+  必须包含：
+    - 现有方案能否直接复用
+    - 我们的工作和已有工作的差异点
+    - 预估的最终性能上限
+
+## 任务 0.2：决定 CPU 参考实现的来源
+有三种选择：
+- 选项 A：从零写 6502 CPU 模拟器（学习价值最高，工作量最大）
+- 选项 B：移植 fceux 的核心代码（成熟，但代码量大）
+- 选项 C：移植 quickerNES（quickemu 团队的轻量 NES 模拟器，C 实现，约 5000 行）
+推荐选项 C，理由：代码量适中，已经是性能优化版本，便于后续 CUDA 移植。
+- [ ] 阅读 quickerNES 源码理解整体结构
+- [ ] 评估代码许可证是否兼容（MIT/BSD 通常 OK）
+- [ ] 输出：方案选择文档 docs/reference_impl_choice.md
+
+## 任务 0.3：环境准备
+- [ ] 安装 CUDA 工具链：nvcc, cuda-gdb, nsight-compute
+- [ ] 创建子目录 /work/xmyan/RL_for_Mario/gpu_nes/
+  目录结构：
+    gpu_nes/
+    ├── reference/      # CPU 参考实现
+    ├── cuda/           # CUDA 实现
+    ├── tests/          # 测试用例
+    ├── benchmarks/     # 性能测试
+    └── docs/           # 设计文档
+- [ ] 准备测试 ROM：Super Mario Bros (合法获取或用户提供)
+- [ ] 设置 .gitignore 排除 ROM 文件（版权风险）
+
+# Phase 0 验收标准
+- [ ] 调研报告完成，明确技术路线
+- [ ] 决定使用哪个开源项目作为参考
+- [ ] 开发环境就绪，能编译 CUDA 代码
+
+
+================================================================================
+【Phase 1：CPU 参考实现 - 6502 CPU】 (2-3 周)
+================================================================================
+
+## 任务 1.1：6502 指令集实现
+6502 共有 56 条官方指令 + 数十条非官方指令（NES 游戏会用）。
+- [ ] 实现寄存器模型：A, X, Y, SP, PC, P (status flags)
+- [ ] 实现 13 种寻址模式：
+  Implied, Accumulator, Immediate, Zero Page, Zero Page X/Y,
+  Absolute, Absolute X/Y, Indirect, Indexed Indirect, Indirect Indexed,
+  Relative
+- [ ] 实现所有官方指令（按类别）：
+  * 加载/存储：LDA, LDX, LDY, STA, STX, STY
+  * 算术：ADC, SBC
+  * 逻辑：AND, EOR, ORA, BIT
+  * 移位：ASL, LSR, ROL, ROR
+  * 比较：CMP, CPX, CPY
+  * 分支：BCC, BCS, BEQ, BMI, BNE, BPL, BVC, BVS
+  * 跳转：JMP, JSR, RTS
+  * 栈操作：PHA, PHP, PLA, PLP, TSX, TXS
+  * 传送：TAX, TAY, TXA, TYA
+  * 标志：CLC, CLD, CLI, CLV, SEC, SED, SEI
+  * 中断：BRK, RTI, NOP
+- [ ] 实现非官方指令（部分 NES 游戏依赖）：
+  LAX, SAX, DCP, ISC, RLA, RRA, SLO, SRE 等
+- [ ] 实现 cycle 计数（每条指令的精确周期数）
+
+## 任务 1.2：内存映射
+- [ ] 实现 NES 内存映射（CPU 视角）：
+  $0000-$07FF: 内部 RAM (2KB)
+  $0800-$1FFF: RAM 镜像
+  $2000-$2007: PPU 寄存器
+  $2008-$3FFF: PPU 寄存器镜像
+  $4000-$401F: APU 和 IO 寄存器
+  $4020-$5FFF: 扩展 ROM
+  $6000-$7FFF: SRAM
+  $8000-$FFFF: PRG ROM
+- [ ] 实现 Mapper 0（NROM）：Super Mario Bros 用的就是这个
+  * Mapper 0 最简单，只需固定地址映射，无需 bank switching
+  * 后续如要支持其他游戏需要更多 mapper
+
+## 任务 1.3：中断处理
+- [ ] 实现 NMI（PPU 触发）
+- [ ] 实现 IRQ
+- [ ] 实现 Reset
+
+## 任务 1.4：CPU 测试
+关键：必须用业界标准的 CPU 测试 ROM 验证
+- [ ] 下载 nestest.nes 测试 ROM（公开可用）
+- [ ] 实现日志格式与 Nintendulator 一致
+- [ ] 运行 nestest 并对比逐步日志
+  * 必须 100% 通过 8991 行日志才算 CPU 实现正确
+  * 不要跳过这一步！CPU bug 会在后续阶段被无限放大
+
+# Phase 1 验收标准
+- [ ] 通过 nestest.nes 全部 8991 步测试
+- [ ] 单元测试：每条指令至少 5 个测试用例
+- [ ] benchmark：CPU 单核运行 SMB 1 帧 < 50ms（不含 PPU）
+- [ ] 输出：reference/cpu_6502.c, reference/cpu_6502.h
+        tests/test_cpu_nestest.sh
+
+
+================================================================================
+【Phase 2：CPU 参考实现 - PPU 图形】 (3-4 周)
+================================================================================
+
+PPU（Picture Processing Unit）是 NES 的图形芯片，比 CPU 更复杂。
+这是整个项目最难的部分之一。
+
+## 任务 2.1：PPU 寄存器
+- [ ] 实现 8 个 PPU 寄存器（CPU 通过 $2000-$2007 访问）：
+  PPUCTRL ($2000), PPUMASK ($2001), PPUSTATUS ($2002),
+  OAMADDR ($2003), OAMDATA ($2004), PPUSCROLL ($2005),
+  PPUADDR ($2006), PPUDATA ($2007)
+- [ ] 实现 OAM DMA ($4014)
+- [ ] 处理 PPU 写入的特殊行为（如 $2002 读取后清除 vblank flag）
+
+## 任务 2.2：PPU 内部状态
+- [ ] 实现 PPU 内存映射：
+  $0000-$0FFF: Pattern Table 0 (CHR ROM)
+  $1000-$1FFF: Pattern Table 1
+  $2000-$23FF: Nametable 0
+  $2400-$27FF: Nametable 1
+  $2800-$2BFF: Nametable 2
+  $2C00-$2FFF: Nametable 3
+  $3F00-$3F1F: Palette RAM
+- [ ] 实现 OAM (Object Attribute Memory，64 字节，存储精灵信息)
+- [ ] 实现内部寄存器：v, t, x, w（参考 NESdev wiki）
+
+## 任务 2.3：背景渲染
+- [ ] 实现 nametable 读取
+- [ ] 实现 attribute table 读取
+- [ ] 实现 pattern table 读取（tile 数据）
+- [ ] 实现 palette 查找
+- [ ] 实现滚动逻辑（scroll register）
+- [ ] 输出 256x240 RGB 帧缓冲
+
+## 任务 2.4：精灵渲染
+- [ ] 实现精灵评估（每行最多 8 个精灵）
+- [ ] 实现 8x8 和 8x16 精灵模式
+- [ ] 实现精灵 0 命中检测（关键：很多游戏依赖这个做特效）
+- [ ] 实现精灵优先级（前景/背景/精灵之间）
+
+## 任务 2.5：PPU 时序
+- [ ] 实现扫描线时序：262 行 × 341 周期
+- [ ] CPU/PPU 同步：3 PPU 周期 = 1 CPU 周期
+- [ ] 实现 vblank 触发 NMI
+
+## 任务 2.6：PPU 测试
+- [ ] 运行 SMB 并截屏，与 fceux 截图像素级对比
+  * 标题画面、关卡 1-1 起点、马里奥跑动等关键帧
+- [ ] 通过 blargg 的 ppu_tests
+- [ ] PPU 时序测试通过
+
+# Phase 2 验收标准
+- [ ] SMB 标题画面像素完全正确
+- [ ] SMB 关卡 1-1 能正常游玩 60 秒不出错
+- [ ] benchmark：CPU+PPU 全速运行 SMB > 1500 fps（单核）
+- [ ] 输出：reference/ppu.c, reference/ppu.h
+        tests/test_ppu_screenshots.py
+
+
+================================================================================
+【Phase 3：单实例 GPU 移植】 (4-6 周)
+================================================================================
+
+目标：把 Phase 1+2 的 C 代码移植到 CUDA，先跑通单个 Mario 实例。
+关键挑战：把所有状态搬到 GPU 内存，把分支密集代码改成 warp 友好。
+
+## 任务 3.1：状态结构体设计
+- [ ] 定义 NESState 结构体（必须放在 GPU global memory）：
+  * CPU 寄存器（约 8 字节）
+  * RAM 2KB
+  * PPU 寄存器（约 16 字节）
+  * Pattern Table 8KB（CHR ROM，可放 constant memory）
+  * Nametable 4KB
+  * OAM 256 字节
+  * Palette 32 字节
+  * Frame buffer 256x240x3 字节
+  * 状态标志、cycle 计数等
+- [ ] 单实例总状态约 200KB
+- [ ] 决策：哪些数据放 global memory，哪些放 shared memory，哪些放 register
+
+## 任务 3.2：CPU 模拟器 CUDA 移植
+- [ ] 把 cpu_6502.c 改写为 __device__ 函数
+- [ ] 用大 switch-case 实现指令分发
+  * 警告：switch-case 在 GPU 上会导致 warp divergence
+  * 优化方案：用函数指针表 + 强制 inline
+- [ ] 处理 GPU 上不支持的 C 特性（如全局变量需要传参）
+
+## 任务 3.3：PPU 模拟器 CUDA 移植
+- [ ] 把 ppu.c 改写为 __device__ 函数
+- [ ] 渲染循环用 warp 协作（32 线程合作渲染一行扫描线）
+  * thread_idx 0-31 各负责一段像素
+- [ ] 注意 memory access pattern，尽量合并访问
+
+## 任务 3.4：主循环 kernel
+- [ ] 写 step() kernel：执行 N 步直到下一帧
+  * 输入：action（按键状态）
+  * 输出：obs（256x240x3 RGB）, reward, done
+- [ ] 处理控制器输入
+
+## 任务 3.5：单实例验证
+- [ ] 写 host 端测试代码：
+  load_rom() → run_steps(action_seq) → 截屏
+- [ ] 与 Phase 2 的 CPU 版本逐帧对比
+  * 像素必须完全一致（GPU 计算应该是确定性的）
+- [ ] 性能测试：单实例 GPU vs CPU
+  * GPU 单实例可能比 CPU 慢（kernel 启动开销）
+  * 这是预期的，Phase 4 批量并行后才能体现优势
+
+# Phase 3 验收标准
+- [ ] 单实例 GPU 运行 SMB 60 秒，每一帧与 CPU 版本像素级一致
+- [ ] 通过 nestest.nes（GPU 版本）
+- [ ] benchmark：单实例 GPU 速度 > 100 fps（不要求快，要求正确）
+- [ ] 输出：cuda/nes_kernel.cu, cuda/nes_state.h
+
+
+================================================================================
+【Phase 4：批量并行 GPU 模拟器】 (3-4 周)
+================================================================================
+
+这一步决定项目成败。前面都做对了，但如果并行扩展性差，就没意义。
+
+## 任务 4.1：并行架构设计
+- [ ] 决定并行粒度：
+  * 选项 A：每个 thread 一个 NES 实例（简单但 register 压力大）
+  * 选项 B：每个 warp（32 线程）一个 NES 实例（warp 内协作渲染 PPU）
+  * 选项 C：每个 thread block（128 线程）多个 NES 实例
+  推荐选项 B，平衡并行度和资源利用
+- [ ] 估算：V100 有 80 SM，每 SM 64 warp → 理论 5120 个 NES 并行实例
+  现实中受 register/shared memory 限制，可能 1000-2000 实例
+
+## 任务 4.2：内存布局
+- [ ] State of Arrays（SoA）布局：
+  把 N 个 NES 实例的相同字段放在一起
+  例如：所有实例的 PC 寄存器是一个数组 pc[N]
+- [ ] 这样 warp 内访问相邻实例的同一字段是 coalesced 的
+- [ ] CHR ROM 共享（所有实例共享同一份）放 constant memory
+
+## 任务 4.3：批量 kernel
+- [ ] batch_step kernel：N 个实例同时跑 1 帧
+  * 输入：actions (N,)，N 个实例各自的当前状态
+  * 输出：obs (N, 240, 256, 3)，rewards (N,)，dones (N,)
+- [ ] 处理 done 后的自动 reset（关卡切换）
+- [ ] 注意：done 时间不同会导致 warp divergence，但这是不可避免的
+
+## 任务 4.4：obs 后处理 GPU kernel
+- [ ] 实现 RGB → 灰度（GPU 上做，避免 CPU 拷贝）
+- [ ] 实现 240x256 → 84x84 resize（GPU bilinear）
+- [ ] 实现 frame stack（4 帧）
+- [ ] 最终输出：(N, 4, 84, 84) uint8，直接喂给 PyTorch 模型
+  * 这一步是端到端 GPU 流水线的关键
+
+## 任务 4.5：性能优化
+- [ ] 用 nsight-compute 分析 kernel 性能
+- [ ] 找出瓶颈：register pressure / shared mem / divergence / memory
+- [ ] 针对性优化：
+  * 减少 register 用量 → 提高 occupancy
+  * 用 shared memory 缓存频繁访问的状态
+  * 把 PPU 渲染拆成多个 kernel 减少 divergence
+- [ ] 目标：1000 实例同时跑，每实例 60 fps → 60000 fps 总吞吐
+
+## 任务 4.6：扩展性测试
+- [ ] 测试不同 batch size：64, 256, 1024, 4096
+- [ ] 画出 throughput vs batch_size 曲线
+- [ ] 找到性能拐点
+
+# Phase 4 验收标准
+- [ ] 1024 实例同时运行，总吞吐 > 30000 fps（每实例约 30 fps）
+- [ ] 这相当于 nes_py 的 100 倍以上
+- [ ] 1024 实例的 obs 与单实例对比无差异
+- [ ] 输出：cuda/batch_kernel.cu, cuda/obs_postprocess.cu
+
+
+================================================================================
+【Phase 5：Python / gymnasium 接口封装】 (1 周)
+================================================================================
+
+## 任务 5.1：CUDA-Python 绑定
+- [ ] 用 pybind11 或 ctypes 包装 CUDA kernel
+- [ ] 接口：
+  ```python
+  class GPUMarioVecEnv:
+      def __init__(self, num_envs, rom_path):
+          ...
+      def reset(self) -> torch.Tensor:           # (N, 4, 84, 84) uint8 cuda
+      def step(self, actions: torch.Tensor):     # actions: (N,) int cuda
+          # → obs, rewards, dones, infos
+      def close(self): ...
+  ```
+- [ ] obs 直接是 torch CUDA tensor，零拷贝传给模型
+
+## 任务 5.2：兼容现有训练代码
+- [ ] 确保接口与 scripts/mario/mario_vec_env.py 的 MarioVecEnv 一致
+- [ ] 保留 CurriculumScheduler 接口
+- [ ] 关卡切换：每个实例独立，由调度器管理
+
+## 任务 5.3：单元测试
+- [ ] 测试 reset 返回正确 shape 和 dtype
+- [ ] 测试 step 行为与 nes_py 版本一致
+- [ ] 测试关卡切换正确
+
+# Phase 5 验收标准
+- [ ] from scripts.mario.gpu_vec_env import GPUMarioVecEnv 能正常使用
+- [ ] 接口与原版兼容，训练代码无需大改
+
+
+================================================================================
+【Phase 6：集成到 PPO 训练并对比验证】 (1-2 周)
+================================================================================
+
+## 任务 6.1：DT 权重迁移验证
+- [ ] 用 GPU 模拟器跑 100 episode（随机策略）
+- [ ] 用 nes_py 跑相同 100 episode
+- [ ] 对比 obs 分布（mean, std, histogram）
+- [ ] 如果分布差异大，需要回头查 PPU 实现 bug
+
+## 任务 6.2：DT eval 对比
+- [ ] 用 DT checkpoint 在 GPU 模拟器上推理
+- [ ] 用 DT checkpoint 在 nes_py 上推理
+- [ ] 通关率应该接近（差距 < 5%）
+- [ ] 如果差距大，说明 obs 仍有偏差，DT 不能直接用
+
+## 任务 6.3：PPO 训练对比实验
+- [ ] 配置 1：nes_py 16 envs，跑 1M 步（基线）
+- [ ] 配置 2：GPU 1024 envs，跑 1M 步
+- [ ] 对比：
+  * wall clock time
+  * sample efficiency（每步学到多少）
+  * 最终 clear rate
+- [ ] 期望：GPU 版本 wall clock 时间是基线的 1/10 - 1/30
+
+## 任务 6.4：性能调优
+- [ ] 如果 GPU 版本反而更慢，分析瓶颈：
+  * 可能是 batch_size 不匹配（PPO update 慢）
+  * 可能是 obs 后处理瓶颈
+  * 可能是 PyTorch ↔ CUDA 同步开销
+- [ ] 优化 PPO 训练循环以匹配高 throughput
+
+# Phase 6 验收标准
+- [ ] DT 权重在 GPU 模拟器上 eval 通关率与 nes_py 差距 < 5%
+- [ ] PPO 训练 1M 步，GPU 版本耗时 < 30 分钟（基线 1.5 小时）
+- [ ] clear rate 在相同步数下与基线持平或更好
+
+
+================================================================================
+【关键参考资料】
+================================================================================
+
+## NES 硬件文档
+- NESdev Wiki：https://www.nesdev.org/wiki/Nesdev_Wiki（最权威）
+- 6502 指令参考：http://obelisk.me.uk/6502/
+- PPU 详细文档：https://www.nesdev.org/wiki/PPU
+- Nintendulator 测试日志格式
+
+## 开源 NES 模拟器
+- fceux：https://github.com/TASEmulators/fceux
+- nestopia：https://github.com/0ldsk00l/nestopia
+- quickerNES：https://github.com/SergioMartin86/quickerNES（推荐参考）
+- LaiNES：https://github.com/AndreaOrru/LaiNES（C++ 简洁实现）
+
+## GPU 模拟器相关工作
+- cuLE：https://github.com/NVlabs/cule（CUDA Atari，最相关）
+- WarpDrive：https://github.com/salesforce/warp-drive
+- Madrona：https://github.com/shacklettbp/madrona
+
+## CUDA 学习
+- 《Programming Massively Parallel Processors》第 4 版
+- NVIDIA CUDA C++ Programming Guide
+- nsight-compute 文档
+
+
+================================================================================
+【沟通规则】
+================================================================================
+
+每完成一个 phase，向用户汇报：
+- 实际花费时间 vs 预估时间
+- 验收标准是否全部达成
+- 遇到的关键问题和解决方法
+- 下一阶段的风险评估
+
+任何阶段超时 50% 以上，主动建议用户考虑放弃此路线，回退到 stable-retro。
+
+不要为了做完而做完，每个阶段的验收标准必须严格通过。
+特别是 CPU 实现的 nestest 全通过、PPU 像素级匹配 fceux，这两个是基础。
+基础不牢，后面全部白做。
+
+
+================================================================================
+【最后的话】
+================================================================================
+
+这个项目相当于"重新发明 NES 模拟器并把它放到 GPU 上"。它困难，
+但可行。cuLE 项目证明了 Atari 模拟器能在 GPU 上跑，原理上 NES 不会更难。
+
+如果你（接手的 AI/工程师）阅读到这里，请记住：
+- 不要跳过测试。CPU 一个 bug 会让 PPU 全错，PPU 一个 bug 会让 RL 训练崩。
+- 不要为优化而优化。先正确，再快。Phase 4 之前别管性能。
+- 不要怕大改。如果发现架构错了，重写比硬撑容易。
+- 定期向用户报告进度，不要自己埋头干 3 个月才出来。
+
+祝好运。
+
+================================================================================
+                                  END OF FILE
+================================================================================
