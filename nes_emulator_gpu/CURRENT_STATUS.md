@@ -11,7 +11,7 @@
 ```
 Phase 0: 研究和准备        [██████████] 100% ✅ 完成
 Phase 1: CPU参考实现       [██████████] 100% ✅ 完成
-Phase 2: PPU参考实现       [████████  ]  83% 🚧 当前 (Task 2.1-2.5完成)
+Phase 2: PPU参考实现       [████████  ]  83% 🚧 当前 (Task 2.1-2.5完成 + 优化)
 Phase 3: GPU单实例移植     [          ]   0% ⏳
 Phase 4: GPU批量并行       [          ]   0% ⏳
 Phase 5: Python API        [          ]   0% ⏳
@@ -135,7 +135,18 @@ Phase 6: PPO集成           [          ]   0% ⏳
 **预计时间**: 3-4周  
 **当前进度**: 83% (Task 2.1-2.5完成)
 
-### 最新进展 (Task 2.5完成: NMI和定时系统)
+### 最新进展 (Task 2.5完成: NMI和定时系统 + 渲染优化)
+
+✅ **渲染优化完成**: 2.2×性能提升
+1. **Tile-Based背景渲染**:
+   - 内存读取: 184,320 → 23,040 per frame (-87.5%)
+   - 测试执行: 90ms → 40ms (2.25× faster)
+2. **Sprite Pattern预取**:
+   - CHR读取: 491,520 → 3,840 per frame (-99.2%)
+   - 调用减少: 256 → 8 per scanline (-97%)
+3. **综合影响**: ~2.5×渲染速度提升，测试套件90ms→41ms
+4. **文档**: tile_based_rendering_optimization.md (230行)
+5. **文档**: sprite_pattern_prefetch_optimization.md (299行)
 
 ✅ **Task 2.5完成**: NMI和定时系统
 - 262条扫描线精确帧结构 (0-261)
@@ -197,17 +208,22 @@ Phase 6: PPO集成           [          ]   0% ⏳
 - [x] 单元测试覆盖率 > 70% ✅
 - [x] 136单元测试全部通过 ✅
 
-### 已产出代码 (Task 2.1-2.5)
-- **源代码**: ~966行
-  - ppu.cpp: 656行 ✅ (含NMI/定时逻辑)
-  - ppu.h: 235行 ✅
+### 已产出代码 (Task 2.1-2.5 + 优化)
+- **源代码**: ~1,068行
+  - ppu.cpp: 762行 ✅ (含NMI/定时逻辑+优化)
+  - ppu.h: 248行 ✅
   - palette.h: 58行 ✅
   - instructions.cpp: 修订 ✅
-- **测试代码**: ~1272行
+- **测试代码**: ~1,272行
   - test_ppu_registers.cpp: 437行 ✅ (含VBlank/NMI测试)
   - test_background.cpp: 314行 ✅
   - test_sprites.cpp: 240行 ✅
   - test_scrolling.cpp: 245行 ✅
+  - test_scroll_rendering.cpp: 142行 ✅
+- **文档**: ~979行
+  - ppu_optimization_opportunities.md: 450行
+  - tile_based_rendering_optimization.md: 230行
+  - sprite_pattern_prefetch_optimization.md: 299行
   - test_scroll_rendering.cpp: 138行 ✅
   - test_rendering_integration.cpp: 156行 ✅
 - **文档**: 
