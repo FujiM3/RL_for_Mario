@@ -214,10 +214,14 @@ void PPU::tick() {
             int x = cycle - 1;
             int y = scanline;
             
-            // Render background pixel
-            render_background_pixel(x, y);
+            // OPTIMIZATION: Render background tile-by-tile (every 8th pixel)
+            // This reduces memory reads by 8x
+            if ((x % 8) == 0) {
+                int tile_x = x / 8;
+                render_background_tile(tile_x, y);
+            }
             
-            // Render sprite pixel (on top)
+            // Render sprite pixel (still per-pixel, but only where sprites exist)
             render_sprite_pixel(x, y);
         }
         
@@ -397,6 +401,42 @@ void PPU::render_background_pixel(int x, int y) {
     
     // Write to framebuffer
     framebuffer[y * 256 + x] = color;
+}
+
+// OPTIMIZED: Render an entire 8-pixel tile at once
+// Reduces memory reads by 8x and divisions by 8x
+void PPU::render_background_tile(int tile_x, int y) {
+    // Check if background rendering is enabled
+    if (!(mask & 0x08)) {
+        // Background disabled, use backdrop color for all 8 pixels
+        uint32_t backdrop = get_palette_color(palette[0]);
+        int base_x = tile_x * 8;
+        for (int px = 0; px < 8; px++) {
+            framebuffer[y * 256 + base_x + px] = backdrop;
+        }
+        return;
+    }
+    
+    int tile_y = y / 8;
+    int fine_y = y % 8;
+    
+    // Fetch tile data ONCE for all 8 pixels
+    uint8_t tile_index = get_nametable_tile(tile_x, tile_y);
+    uint8_t palette_idx = get_attribute_palette(tile_x, tile_y);
+    
+    uint8_t pattern_lo, pattern_hi;
+    get_pattern_tile(tile_index, fine_y, pattern_lo, pattern_hi);
+    
+    // Render all 8 pixels using the fetched data
+    int base_x = tile_x * 8;
+    for (int px = 0; px < 8; px++) {
+        uint8_t bit_shift = 7 - px;
+        uint8_t pixel = ((pattern_hi >> bit_shift) & 1) << 1 | 
+                        ((pattern_lo >> bit_shift) & 1);
+        
+        uint32_t color = get_background_color(palette_idx, pixel);
+        framebuffer[y * 256 + base_x + px] = color;
+    }
 }
 
 uint8_t PPU::get_nametable_tile(int nt_x, int nt_y) {

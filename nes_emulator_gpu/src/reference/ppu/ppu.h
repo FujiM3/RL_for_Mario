@@ -196,6 +196,9 @@ private:
     // Render background pixel at specific position
     void render_background_pixel(int x, int y);
     
+    // Render background tile (8 pixels at once) - OPTIMIZED
+    void render_background_tile(int tile_x, int y);
+    
     // Render using v register (hardware-accurate scrolling)
     void render_pixel_from_v(int screen_x, int screen_y);
     
