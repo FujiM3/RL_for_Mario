@@ -188,73 +188,62 @@ void PPU::tick() {
         scanline++;
         
         if (scanline > 261) {
-            // Wrap to scanline 0 (start of next frame)
             scanline = 0;
-            
-            // TODO: Odd frame skips cycle 0 of scanline 0 (when rendering enabled)
-            // This makes odd frames 1 PPU cycle shorter (89341 vs 89342)
         }
         
         // Frame is ready when we complete scanline 260 and enter scanline 261 (pre-render)
-        // Scanline 261 is preparation for the next frame
         if (scanline == 261) {
             frame_ready = true;
         }
     }
     
-    // ========== Visible Scanlines (0-239) ==========
+    // OPTIMIZATION: Fast path for visible scanlines (0-239)
+    // This is the hot path (~85% of all ticks: 240*341 / 89342)
     if (scanline < 240) {
         // Sprite evaluation at cycle 0
         if (cycle == 0) {
             evaluate_sprites();
+            return;  // Early exit
         }
         
         // Render pixels (cycle 1-256)
-        if (cycle >= 1 && cycle <= 256) {
+        if (cycle <= 256) {  // Already >= 1 because cycle 0 returned above
             int x = cycle - 1;
-            int y = scanline;
             
             // OPTIMIZATION: Render background tile-by-tile (every 8th pixel)
-            // This reduces memory reads by 8x
-            if ((x % 8) == 0) {
-                int tile_x = x / 8;
-                render_background_tile(tile_x, y);
+            if ((x & 7) == 0) {  // Use bitwise AND instead of modulo
+                render_background_tile(x >> 3, scanline);  // Use shift instead of division
             }
             
-            // Render sprite pixel (still per-pixel, but only where sprites exist)
-            render_sprite_pixel(x, y);
+            // Render sprite pixel
+            render_sprite_pixel(x, scanline);
         }
-        
-        // Cycles 257-320: Sprite fetches for next scanline
-        // Cycles 321-336: Background fetches for next scanline
-        // Cycles 337-340: Unknown fetches
-        // (Not implemented in simplified version)
+        // Cycles 257+: Prefetch for next scanline (not implemented)
+        return;  // Early exit for entire visible scanline range
     }
     
-    // ========== Post-render Scanline (240) ==========
-    // Idle scanline, no rendering
+    // ========== Special Scanlines ==========
+    // Only reached for scanlines 240-261 (~15% of ticks)
     
-    // ========== VBlank Scanlines (241-260) ==========
+    // Scanline 240: Post-render (idle)
+    // (No action needed)
+    
+    // Scanline 241: VBlank start
     if (scanline == 241 && cycle == 1) {
-        // Set VBlank flag
-        status |= 0x80;
-        
-        // Trigger NMI if enabled
+        status |= 0x80;  // Set VBlank flag
         if (ctrl & 0x80) {
-            nmi_flag = true;
+            nmi_flag = true;  // Trigger NMI if enabled
         }
+        return;
     }
     
-    // ========== Pre-render Scanline (261) ==========
+    // Scanline 261: Pre-render
     if (scanline == 261) {
         if (cycle == 1) {
-            // Clear VBlank, sprite 0 hit, sprite overflow flags
-            status &= ~0xE0;
+            status &= ~0xE0;  // Clear VBlank, sprite 0 hit, sprite overflow
             nmi_flag = false;
         }
-        
-        // Cycles 280-304: Copy vertical bits from t to v (scroll reset)
-        if (cycle >= 280 && cycle <= 304) {
+        else if (cycle >= 280 && cycle <= 304) {
             if (mask & 0x18) {  // If rendering enabled
                 copy_vertical_bits();
             }
@@ -450,8 +439,8 @@ uint8_t PPU::get_nametable_tile(int nt_x, int nt_y) {
     // Calculate address within nametable
     uint16_t addr = nt_base + (nt_y * 32) + nt_x;
     
-    // Read from VRAM (with mirroring)
-    return ppu_read(addr);
+    // OPTIMIZED: Use fast nametable read (bypass ppu_read address decoding)
+    return read_nametable_fast(addr);
 }
 
 uint8_t PPU::get_attribute_palette(int nt_x, int nt_y) {
@@ -466,8 +455,8 @@ uint8_t PPU::get_attribute_palette(int nt_x, int nt_y) {
     // Each attribute byte covers 4x4 tiles
     uint16_t attr_addr = nt_base + 0x3C0 + (nt_y / 4) * 8 + (nt_x / 4);
     
-    // Read attribute byte
-    uint8_t attr_byte = ppu_read(attr_addr);
+    // OPTIMIZED: Use fast nametable read (attribute table is part of nametable)
+    uint8_t attr_byte = read_nametable_fast(attr_addr);
     
     // Which quadrant within the 4x4 tile area?
     // Top-left: bits 0-1
@@ -520,7 +509,8 @@ uint8_t PPU::get_tile_from_v() {
     // v bits: yyy NN YYYYY XXXXX
     // Nametable address: $2000 + (NN << 10) + (YYYYY << 5) + XXXXX
     uint16_t addr = 0x2000 | (v & 0x0FFF);
-    return ppu_read(addr);
+    // OPTIMIZED: Use fast nametable read
+    return read_nametable_fast(addr);
 }
 
 uint8_t PPU::get_attribute_from_v() {
@@ -537,8 +527,8 @@ uint8_t PPU::get_attribute_from_v() {
     // Attribute table address
     uint16_t attr_addr = nt_base + 0x3C0 + (coarse_y / 4) * 8 + (coarse_x / 4);
     
-    // Read attribute byte
-    uint8_t attr_byte = ppu_read(attr_addr);
+    // OPTIMIZED: Use fast nametable read  
+    uint8_t attr_byte = read_nametable_fast(attr_addr);
     
     // Which quadrant within the 4x4 tile area?
     int quadrant_x = (coarse_x % 4) / 2;
@@ -645,8 +635,9 @@ uint16_t PPU::get_sprite_pattern(uint8_t tile, int fine_y, bool vflip) {
 uint32_t PPU::get_sprite_color(uint8_t palette_idx, uint8_t pixel) {
     // Sprite palettes are at $3F10-$3F1F
     // palette_idx is 0-3, pixel is 1-3 (0 is transparent)
-    uint16_t addr = 0x3F10 + palette_idx * 4 + pixel;
-    uint8_t color_index = ppu_read(addr);
+    uint8_t palette_offset = 0x10 + palette_idx * 4 + pixel;
+    // OPTIMIZED: Direct palette access (no address decoding needed)
+    uint8_t color_index = read_palette_fast(palette_offset);
     return nes::get_palette_color(color_index);
 }
 

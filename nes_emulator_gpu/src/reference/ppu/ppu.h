@@ -187,6 +187,24 @@ private:
     // Write to PPU address space
     void ppu_write(uint16_t addr, uint8_t value);
     
+    // OPTIMIZATION: Fast-path memory access (inline, no full address decoding)
+    // These bypass ppu_read() for hot rendering paths where address range is known
+    
+    // Fast nametable read (addr must be in $2000-$3EFF range)
+    inline uint8_t read_nametable_fast(uint16_t addr) {
+        return vram[mirror_nametable(addr)];
+    }
+    
+    // Fast palette read (index 0-31)
+    inline uint8_t read_palette_fast(uint8_t index) {
+        index &= 0x1F;
+        // Palette mirroring: $10, $14, $18, $1C mirror to $00, $04, $08, $0C
+        if ((index & 0x13) == 0x10) {
+            index &= 0x0F;
+        }
+        return palette[index];
+    }
+    
     // Mirror nametable address based on mirroring mode
     uint16_t mirror_nametable(uint16_t addr);
     
