@@ -7,8 +7,19 @@ using namespace nes;
 // ========== Palette Tests ==========
 
 TEST(Palette, ColorCount) {
-    // NES palette should have exactly 64 colors
-    EXPECT_EQ(64, sizeof(NES_PALETTE) / sizeof(NES_PALETTE[0]));
+    // NES palette is now extended to 256 entries (with mirroring) for optimization
+    // Original 64 colors mirrored 4 times
+    EXPECT_EQ(256, sizeof(NES_PALETTE) / sizeof(NES_PALETTE[0]));
+    
+    // Verify mirroring: entries 0-63 should equal 64-127, 128-191, 192-255
+    for (int i = 0; i < 64; i++) {
+        EXPECT_EQ(NES_PALETTE[i], NES_PALETTE[i + 64]) 
+            << "Mirroring failed at index " << i << " and " << (i + 64);
+        EXPECT_EQ(NES_PALETTE[i], NES_PALETTE[i + 128])
+            << "Mirroring failed at index " << i << " and " << (i + 128);
+        EXPECT_EQ(NES_PALETTE[i], NES_PALETTE[i + 192])
+            << "Mirroring failed at index " << i << " and " << (i + 192);
+    }
 }
 
 TEST(Palette, GetPaletteColor) {
