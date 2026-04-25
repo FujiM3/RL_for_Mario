@@ -16,6 +16,7 @@
 - **数据采集脚本**：
   - `scripts\mario\collect_dt_dataset_from_ppo.py`（单关/向量化采集）
   - `scripts\mario\collect_random_level_eps_rollouts.py`（多关随机并发采集）
+  - `scripts\mario\collect_stratified_random_level_rollouts.py`（分层采样调度并自动合并）
 - **训练脚本**：`trainer\train_pretrain.py`
 - **可视化与联调**：
   - `scripts\mario\visualize_ppo_rollout.py`
@@ -75,6 +76,47 @@ python scripts\mario\collect_random_level_eps_rollouts.py `
   --cap_mode ondemand
 ```
 
+### 2.1) 分层采样采集（Expert / Micro-Recovery / Exploratory）
+
+```powershell
+python scripts\mario\collect_stratified_random_level_rollouts.py `
+  --ckpt_dir trained_models `
+  --output_path dataset\random_data\stratified_rollouts_50000.pkl `
+  --total_episodes 50000 `
+  --expert_ratio 0.35 `
+  --micro_ratio 0.45 `
+  --failure_ratio 0.20 `
+  --failure_epsilon_max 0.15 `
+  --min_length 100 `
+  --min_return 500 `
+  --num_workers 8 `
+  --ipc_mode spill `
+  --shard_size 64
+```
+
+可选开启质量停机守门（默认开启）：
+- `--qc_expert_min_clear_ratio` / `--qc_expert_min_p90_x`：专家层硬门槛（推荐最严格）
+- `--qc_micro_min_clear_ratio` / `--qc_micro_min_p90_x`：微扰恢复层门槛
+- `--qc_failure_min_clear_ratio` / `--qc_failure_min_p90_x`：失败探索层门槛
+- `--qc_skip_failure_tier 0|1`：是否跳过失败层质检（默认 0，不跳过）
+- `--qc_min_clear_ratio` / `--qc_min_p90_return` / `--qc_min_p90_x`：全局兜底阈值（兼容旧参数）
+- `--disable_qc`：关闭自动停机（不推荐）
+- `--resume 0|1`：是否复用已存在的 tier 输出并从断点继续（默认 1）
+
+如果你希望只记住一个入口脚本，也可以通过 `collect_dt_dataset_from_ppo.py` 转发到随机采集器：
+
+```powershell
+python scripts\mario\collect_dt_dataset_from_ppo.py `
+  --collector random_level `
+  --ckpt_dir trained_models `
+  --output_path dataset\aligned_greedy\random_level_eps_rollouts.pkl `
+  --total_episodes 500 `
+  --epsilon_min 0.00 `
+  --epsilon_max 0.25 `
+  --gate_ratio 0.70 `
+  --cap_mode ondemand
+```
+
 ### 3) 训练 Decision Transformer
 
 ```powershell
@@ -124,6 +166,8 @@ python scripts\mario\visualize_ppo_rollout.py `
 1. `action_type` 必须和 checkpoint 的动作维度匹配，否则脚本会报错。
 2. 采集与可视化脚本依赖 Mario Gym 环境（`gym-super-mario-bros`, `nes-py`）。
 3. `model\model_minimind.py` 主要用于通用语言模型结构实验，不是 Mario 训练主入口。
+4. 两个采集脚本现在都支持中断落盘（例如 `Ctrl+C`）：会保存当前已保留的 episode，并在 `metadata` 中标记 `interrupted` 与 `collection_completed`；随机并发采集器还支持 `--checkpoint_interval` 周期性检查点，降低异常掉电时的数据损失。
+5. 若单关采集环境缺少 `shimmy`，脚本会自动回退到进程内向量环境继续采集（速度可能略慢，但不阻塞保存）。
 
 ## 采集速度优化建议（重点）
 
@@ -133,4 +177,4 @@ python scripts\mario\visualize_ppo_rollout.py `
 4. 若要进一步降低 IPC 与内存峰值，建议开启：
    - `--ipc_mode spill`（worker 先落盘再回传路径）
    - `--shard_size 128`（父进程按分片落盘，避免单文件大内存累积）
-
+   - `--spill_direct_shard 1`（默认开启；在 spill+shard 模式下由 worker 按 `shard_size` 直接写 shard，减少父进程读回+重写）

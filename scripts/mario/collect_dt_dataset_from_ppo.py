@@ -7,6 +7,8 @@ import os
 import pickle
 import random
 import re
+import subprocess
+import sys
 from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -21,7 +23,10 @@ import gym_super_mario_bros
 from gym_super_mario_bros.actions import COMPLEX_MOVEMENT, RIGHT_ONLY, SIMPLE_MOVEMENT
 from nes_py.wrappers import JoypadSpace
 
-from stable_baselines3.common.vec_env import SubprocVecEnv
+try:
+    from stable_baselines3.common.vec_env import SubprocVecEnv
+except Exception:
+    SubprocVecEnv = None
 import gym
 
 
@@ -307,6 +312,62 @@ def make_env(env_id: str, rank: int, seed: int, action_type: str, skip: int) -> 
     return _init
 
 
+class SimpleVecEnvCompat:
+    """In-process VecEnv-compatible fallback when SB3+shimmy is unavailable."""
+
+    def __init__(self, env_fns: List[Callable[[], Any]]):
+        self.envs = [fn() for fn in env_fns]
+        if not self.envs:
+            raise ValueError("SimpleVecEnvCompat requires at least one environment.")
+        self.action_space = self.envs[0].action_space
+
+    @staticmethod
+    def _extract_reset_obs(reset_out: Any) -> np.ndarray:
+        if isinstance(reset_out, tuple) and len(reset_out) == 2:
+            return reset_out[0]
+        return reset_out
+
+    def reset(self) -> np.ndarray:
+        obs_batch = [self._extract_reset_obs(env.reset()) for env in self.envs]
+        return np.asarray(obs_batch)
+
+    def step(self, actions: np.ndarray):
+        next_obs_batch = []
+        rewards = []
+        dones = []
+        infos: List[Dict[str, Any]] = []
+
+        for i, env in enumerate(self.envs):
+            step_out = env.step(int(actions[i]))
+            obs, reward, terminated, truncated, info = _extract_step(step_out)
+            done = bool(terminated or truncated)
+            info = dict(info)
+
+            if done:
+                info["terminal_observation"] = obs
+                reset_obs = self._extract_reset_obs(env.reset())
+                obs = reset_obs
+
+            next_obs_batch.append(obs)
+            rewards.append(float(reward))
+            dones.append(done)
+            infos.append(info)
+
+        return (
+            np.asarray(next_obs_batch),
+            np.asarray(rewards, dtype=np.float32),
+            np.asarray(dones, dtype=np.bool_),
+            infos,
+        )
+
+    def close(self):
+        for env in self.envs:
+            try:
+                env.close()
+            except Exception:
+                pass
+
+
 def compute_returns_to_go(rewards: np.ndarray) -> np.ndarray:
     if rewards.ndim != 1:
         raise ValueError(f"rewards must be 1D array, got shape {rewards.shape}")
@@ -425,27 +486,136 @@ def atomic_pickle_dump(obj: Any, output_path: str) -> None:
                 pass
 
 
+def normalize_cli_path(path: str) -> str:
+    return os.path.normpath(path.replace("\\", os.sep).replace("/", os.sep))
+
+
+def run_random_level_collector(args: argparse.Namespace) -> None:
+    script_path = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)),
+        "collect_random_level_eps_rollouts.py",
+    )
+    if not os.path.isfile(script_path):
+        raise FileNotFoundError(f"random-level collector not found: {script_path}")
+
+    cmd = [
+        sys.executable,
+        script_path,
+        "--ckpt_dir",
+        normalize_cli_path(args.ckpt_dir),
+        "--output_path",
+        normalize_cli_path(args.output_path),
+        "--total_episodes",
+        str(args.total_episodes),
+        "--max_steps",
+        str(args.max_steps),
+        "--epsilon_min",
+        str(args.epsilon_min),
+        "--epsilon_max",
+        str(args.epsilon_max),
+        "--seed",
+        str(args.seed),
+        "--min_return",
+        str(args.min_return),
+        "--min_length",
+        str(args.min_length),
+        "--action_type",
+        args.action_type,
+        "--skip",
+        str(args.skip),
+        "--num_workers",
+        str(args.num_workers),
+        "--min_per_level",
+        str(args.min_per_level),
+        "--max_per_level",
+        str(args.max_per_level),
+        "--gate_ratio",
+        str(args.gate_ratio),
+        "--gate_min_x",
+        str(args.gate_min_x),
+        "--gate_max_x",
+        str(args.gate_max_x),
+        "--max_silent_steps",
+        str(args.max_silent_steps),
+        "--max_stagnant_steps",
+        str(args.max_stagnant_steps),
+        "--cap_probe_steps",
+        str(args.cap_probe_steps),
+        "--cap_mode",
+        args.cap_mode,
+        "--default_cap_x",
+        str(args.default_cap_x),
+        "--device",
+        args.device,
+        "--ipc_mode",
+        args.ipc_mode,
+        "--spill_dir",
+        normalize_cli_path(args.spill_dir) if args.spill_dir else "",
+        "--shard_size",
+        str(args.shard_size),
+    ]
+    if args.fast_start:
+        cmd.append("--fast_start")
+    subprocess.run(cmd, check=True)
+
+
 def main():
     parser = argparse.ArgumentParser(
-        description="Vectorized DT dataset collection from PPO with SubprocVecEnv (legacy repro defaults)."
+        description=(
+            "DT dataset collection from PPO. "
+            "Use --collector single (legacy vec single-level) or --collector random_level."
+        )
     )
-    parser.add_argument("--model_path", type=str, default="PPO_trained_models\\ppo_super_mario_bros_1_1")
-    parser.add_argument("--env_id", type=str, default="SuperMarioBros-1-1-v0")
-    parser.add_argument("--output_path", type=str, default="dataset\\aligned_greedy\\ppo_1_1_greedy.pkl")
+    # Mode selector.
+    parser.add_argument("--collector", type=str, choices=["single", "random_level"], default="single")
+
+    # Shared args (used by both single and random_level).
+    parser.add_argument("--output_path", type=str, default="dataset/random_data/random_data_10000.pkl")
     parser.add_argument("--total_episodes", type=int, default=100)
     parser.add_argument("--max_steps", type=int, default=4000)
     parser.add_argument("--epsilon_min", type=float, default=0.0)
     parser.add_argument("--epsilon_max", type=float, default=0.0)
-    parser.add_argument("--target_x_min", type=int, default=0)
-    parser.add_argument("--target_x_max", type=int, default=0)
     parser.add_argument("--max_silent_steps", type=int, default=1)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--min_return", type=float, default=-1000000.0)
     parser.add_argument("--min_length", type=int, default=1)
-    parser.add_argument("--num_envs", type=int, default=8)
     parser.add_argument("--action_type", type=str, choices=["right", "simple", "complex"], default="simple")
     parser.add_argument("--skip", type=int, default=4)
+
+    # single-only args (legacy vec single-level collector).
+    parser.add_argument("--model_path", type=str, default="trained_models/ppo_super_mario_bros_1_1")
+    parser.add_argument("--env_id", type=str, default="SuperMarioBros-1-1-v0")
+    parser.add_argument("--target_x_min", type=int, default=0)
+    parser.add_argument("--target_x_max", type=int, default=0)
+    parser.add_argument("--num_envs", type=int, default=8)
+
+    # random_level-only args (forwarded to collect_random_level_eps_rollouts.py).
+    parser.add_argument("--ckpt_dir", type=str, default="trained_models")
+    parser.add_argument("--num_workers", type=int, default=4)
+    parser.add_argument("--min_per_level", type=int, default=0)
+    parser.add_argument("--max_per_level", type=int, default=0)
+    parser.add_argument("--gate_ratio", type=float, default=0.7)
+    parser.add_argument("--gate_min_x", type=int, default=400)
+    parser.add_argument("--gate_max_x", type=int, default=3200)
+    parser.add_argument("--max_stagnant_steps", type=int, default=250)
+    parser.add_argument("--cap_probe_steps", type=int, default=5000)
+    parser.add_argument("--cap_mode", type=str, choices=["full", "fast", "ondemand"], default="ondemand")
+    parser.add_argument("--fast_start", action="store_true")
+    parser.add_argument("--default_cap_x", type=int, default=3200)
+    parser.add_argument("--device", type=str, choices=["cpu", "cuda", "auto"], default="auto")
+    parser.add_argument("--ipc_mode", type=str, choices=["auto", "memory", "spill"], default="auto")
+    parser.add_argument("--spill_dir", type=str, default="")
+    parser.add_argument("--shard_size", type=int, default=0)
     args = parser.parse_args()
+    args.output_path = normalize_cli_path(args.output_path)
+    args.model_path = normalize_cli_path(args.model_path)
+    args.ckpt_dir = normalize_cli_path(args.ckpt_dir)
+    if args.spill_dir:
+        args.spill_dir = normalize_cli_path(args.spill_dir)
+
+    if args.collector == "random_level":
+        run_random_level_collector(args)
+        return
 
     if args.total_episodes <= 0:
         raise ValueError("--total_episodes must be > 0")
@@ -482,7 +652,36 @@ def main():
             )
 
     env_fns = [make_env(args.env_id, rank=i, seed=args.seed, action_type=args.action_type, skip=args.skip) for i in range(args.num_envs)]
-    vec_env = SubprocVecEnv(env_fns, start_method="spawn")
+    vec_backend = "simple_fallback"
+    vec_env = None
+    has_shimmy = False
+    try:
+        import shimmy  # type: ignore
+        has_shimmy = shimmy is not None
+    except Exception:
+        has_shimmy = False
+
+    if SubprocVecEnv is not None and has_shimmy:
+        try:
+            vec_env = SubprocVecEnv(env_fns, start_method="spawn")
+            vec_backend = "sb3_subproc"
+        except Exception as e:
+            print(f"[Compat] Failed to init SubprocVecEnv, fallback to in-process vec env: {e}")
+            vec_env = SimpleVecEnvCompat(env_fns)
+            vec_backend = "simple_fallback"
+    else:
+        if SubprocVecEnv is None:
+            print("[Compat] stable_baselines3 vec env unavailable, using in-process vec env.")
+        elif not has_shimmy:
+            print("[Compat] shimmy not found, using in-process vec env fallback.")
+        vec_env = SimpleVecEnvCompat(env_fns)
+        vec_backend = "simple_fallback"
+
+    episodes: List[Dict[str, np.ndarray]] = []
+    bucket_stats = defaultdict(lambda: {"count": 0, "accepted": 0, "returns": [], "lengths": []})
+    all_returns: List[float] = []
+    interrupted = False
+    pbar = None
 
     try:
         if vec_env.action_space.__class__.__name__.lower() != "discrete":
@@ -500,11 +699,6 @@ def main():
 
         is_spawning = np.ones(args.num_envs, dtype=np.bool_)
         target_x = np.asarray([t.target_x for t in trackers], dtype=np.int32)
-
-        episodes: List[Dict[str, np.ndarray]] = []
-        bucket_stats = defaultdict(lambda: {"count": 0, "accepted": 0, "returns": [], "lengths": []})
-        all_returns: List[float] = []
-
         pbar = tqdm(total=args.total_episodes, desc="Collecting episodes", dynamic_ncols=True)
 
         while len(episodes) < args.total_episodes:
@@ -539,9 +733,7 @@ def main():
 
                 done = bool(dones[i])
                 # VecEnv auto-resets done envs. terminal_observation preserves last true state before reset.
-                terminal_obs = info.get("terminal_observation", next_states[i])
                 current_obs = states[i]
-                next_obs_for_transition = terminal_obs if done else next_states[i]
 
                 if is_spawning[i]:
                     trackers[i].silent_steps += 1
@@ -604,10 +796,12 @@ def main():
             states = next_states
             avg_ret = float(np.mean(all_returns)) if all_returns else 0.0
             pbar.set_postfix(avg_return=f"{avg_ret:.2f}", kept=f"{len(episodes)}")
-
-        pbar.close()
-
+    except KeyboardInterrupt:
+        interrupted = True
+        print("\n[Interrupt] Collection interrupted, saving kept episodes...")
     finally:
+        if pbar is not None:
+            pbar.close()
         try:
             vec_env.close()
         except Exception:
@@ -645,6 +839,7 @@ def main():
         "num_envs": args.num_envs,
         "device": device,
         "policy_backend": policy.backend,
+        "vec_backend": vec_backend,
         "action_type": args.action_type,
         "skip": args.skip,
         "default_profile": "legacy_repro",
@@ -656,6 +851,8 @@ def main():
         "episodes_kept": len(episodes),
         "episodes_attempted": total_attempted,
         "keep_ratio": float(len(episodes) / max(1, total_attempted)),
+        "interrupted": bool(interrupted),
+        "collection_completed": bool(len(episodes) >= args.total_episodes),
     }
 
     dataset = {
@@ -675,6 +872,8 @@ def main():
         )
     print(f"\nSaved dataset to: {args.output_path}")
     print(f"Episodes kept: {len(dataset['episodes'])}")
+    if interrupted:
+        print("Collection ended by interrupt; partial dataset has been saved.")
 
 
 if __name__ == "__main__":

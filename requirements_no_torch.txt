@@ -29,9 +29,6 @@ einops==0.8.1
 swanlab==0.6.8
 --pre
 --index-url https://download.pytorch.org/whl/nightly/cu128
-torch>=2.13.0.dev0
-torchvision>=0.27.0.dev0
-torchaudio>=2.11.0.dev0
 gym==0.26.2
 gym-super-mario-bros==7.4.0
 nes-py==8.2.1
