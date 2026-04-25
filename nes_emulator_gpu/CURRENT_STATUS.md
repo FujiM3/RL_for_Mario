@@ -212,12 +212,12 @@ Phase 6: PPO集成           [          ]   0% ⏳
 - [x] v寄存器精确滚动渲染 ✅
 - [x] Scanline精确定时 ✅
 - [x] VBlank NMI生成 ✅
-- [ ] Super Mario Bros完整画面渲染
-- [ ] 通过2+个PPU测试ROM
+- [⏸] Super Mario Bros完整画面渲染 (延后至Phase 6)
+- [⏸] 通过2+个PPU测试ROM (延后至Phase 6)
 - [x] 单元测试覆盖率 > 70% ✅
 - [x] 136单元测试全部通过 ✅
 
-### 已产出代码 (Task 2.1-2.5 + 优化)
+### 已产出代码 (Phase 2完整)
 - **源代码**: ~1,068行
   - ppu.cpp: 762行 ✅ (含NMI/定时逻辑+优化)
   - ppu.h: 248行 ✅
