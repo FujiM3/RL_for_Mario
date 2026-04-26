@@ -60,7 +60,8 @@ void NESBatchGpu::alloc_soa() {
     CUDA_CHECK(cudaMalloc(&d_ppu_palette_,     (size_t)N * NES_PALETTE_SIZE));
     CUDA_CHECK(cudaMalloc(&d_ppu_oam_,         (size_t)N * NES_OAM_SIZE));
     CUDA_CHECK(cudaMalloc(&d_ppu_sprites_,     (size_t)N * NES_MAX_SPRITES * sizeof(ActiveSpriteGPU)));
-    CUDA_CHECK(cudaMalloc(&d_ppu_framebuffer_, (size_t)N * NES_FRAMEBUFFER_SIZE));
+    // d_ppu_framebuffer_: allocated only when rendering is enabled (see set_rendering_enabled)
+    // d_fb_out_: lazily allocated on first get_framebuffers() call
 
     // Zero all arrays
     CUDA_CHECK(cudaMemset(d_cpu_A_,            0, (size_t)N));
@@ -92,7 +93,7 @@ void NESBatchGpu::alloc_soa() {
     CUDA_CHECK(cudaMemset(d_ppu_palette_,     0, (size_t)N * NES_PALETTE_SIZE));
     CUDA_CHECK(cudaMemset(d_ppu_oam_,         0, (size_t)N * NES_OAM_SIZE));
     CUDA_CHECK(cudaMemset(d_ppu_sprites_,     0, (size_t)N * NES_MAX_SPRITES * sizeof(ActiveSpriteGPU)));
-    CUDA_CHECK(cudaMemset(d_ppu_framebuffer_, 0, (size_t)N * NES_FRAMEBUFFER_SIZE));
+    // ppu_framebuffer initialized to 0 when allocated by set_rendering_enabled
 
     // Build the SoA struct on host, then copy to device
     NESBatchStatesSoA h_soa;
@@ -126,7 +127,7 @@ void NESBatchGpu::alloc_soa() {
     h_soa.ppu_palette        = d_ppu_palette_;
     h_soa.ppu_oam            = d_ppu_oam_;
     h_soa.ppu_active_sprites = d_ppu_sprites_;
-    h_soa.ppu_framebuffer    = d_ppu_framebuffer_;
+    h_soa.ppu_framebuffer    = d_ppu_framebuffer_;  // may be nullptr if rendering disabled
 
     CUDA_CHECK(cudaMalloc(&d_soa_, sizeof(NESBatchStatesSoA)));
     CUDA_CHECK(cudaMemcpy(d_soa_, &h_soa, sizeof(NESBatchStatesSoA), cudaMemcpyHostToDevice));
@@ -176,15 +177,15 @@ void NESBatchGpu::free_soa() {
 
 NESBatchGpu::NESBatchGpu(int num_instances)
     : num_instances_(num_instances) {
-    if (num_instances <= 0 || num_instances > 65536) {
-        throw std::invalid_argument("num_instances must be 1–65536");
+    if (num_instances <= 0 || num_instances > 262144) {
+        throw std::invalid_argument("num_instances must be 1–262144");
     }
 
     alloc_soa();
 
-    // RGBA32 output buffer (used by get_framebuffers)
-    size_t fb_out_total = (size_t)num_instances_ * NES_FRAMEBUFFER_SIZE * sizeof(uint32_t);
-    CUDA_CHECK(cudaMalloc(&d_fb_out_, fb_out_total));
+    // Rendering enabled by default: allocate framebuffer
+    set_rendering_enabled(true);
+    // d_fb_out_ is lazily allocated on first get_framebuffers() call
 }
 
 NESBatchGpu::~NESBatchGpu() {
@@ -192,6 +193,38 @@ NESBatchGpu::~NESBatchGpu() {
     if (d_prg_)    cudaFree(d_prg_);
     if (d_chr_)    cudaFree(d_chr_);
     if (d_fb_out_) cudaFree(d_fb_out_);
+}
+
+// ---------------------------------------------------------------------------
+// set_rendering_enabled
+// ---------------------------------------------------------------------------
+
+void NESBatchGpu::set_rendering_enabled(bool enabled) {
+    rendering_enabled_ = enabled;
+    int N = num_instances_;
+
+    if (enabled) {
+        // Allocate framebuffer if not already allocated
+        if (!d_ppu_framebuffer_) {
+            CUDA_CHECK(cudaMalloc(&d_ppu_framebuffer_, (size_t)N * NES_FRAMEBUFFER_SIZE));
+            CUDA_CHECK(cudaMemset(d_ppu_framebuffer_, 0, (size_t)N * NES_FRAMEBUFFER_SIZE));
+        }
+    } else {
+        // Free framebuffer to save memory; ppu_tick will skip pixel writes (null check)
+        if (d_ppu_framebuffer_) {
+            cudaFree(d_ppu_framebuffer_);
+            d_ppu_framebuffer_ = nullptr;
+        }
+    }
+
+    // Update ppu_framebuffer pointer in the device SoA struct
+    // We need to patch the ppu_framebuffer field of the d_soa_ struct on device.
+    // The SoA struct is on device, so we use offsetof + cudaMemcpy.
+    uint8_t* new_ptr = d_ppu_framebuffer_;  // may be nullptr
+    size_t field_offset = offsetof(NESBatchStatesSoA, ppu_framebuffer);
+    CUDA_CHECK(cudaMemcpy(
+        reinterpret_cast<uint8_t*>(d_soa_) + field_offset,
+        &new_ptr, sizeof(uint8_t*), cudaMemcpyHostToDevice));
 }
 
 // ---------------------------------------------------------------------------
@@ -263,6 +296,16 @@ void NESBatchGpu::run_frames_all(int num_frames) {
 // ---------------------------------------------------------------------------
 
 void NESBatchGpu::get_framebuffers(uint32_t* host_output) {
+    if (!rendering_enabled_ || !d_ppu_framebuffer_) {
+        throw std::runtime_error("Call set_rendering_enabled(true) before get_framebuffers()");
+    }
+
+    // Lazily allocate the RGBA32 output buffer (N × 240 × 256 × 4B)
+    if (!d_fb_out_) {
+        size_t fb_out_total = (size_t)num_instances_ * NES_FRAMEBUFFER_SIZE * sizeof(uint32_t);
+        CUDA_CHECK(cudaMalloc(&d_fb_out_, fb_out_total));
+    }
+
     // Launch: one block per instance, 256 threads per block (one per pixel column)
     nes_batch_get_framebuffers<<<num_instances_, 256>>>(d_soa_, d_fb_out_);
     CUDA_CHECK(cudaGetLastError());

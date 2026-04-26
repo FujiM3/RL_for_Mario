@@ -56,7 +56,15 @@ public:
     // Run N frames for all instances (no host sync between frames, fast)
     void run_frames_all(int num_frames);
 
+    // Set render output mode (default: rendering enabled)
+    // When disabled: ppu_framebuffer is null → pixel writes skipped → faster GPU
+    // + saves N × 61,440 bytes of device memory.
+    // Re-enable before calling get_framebuffers().
+    void set_rendering_enabled(bool enabled);
+    bool rendering_enabled() const { return rendering_enabled_; }
+
     // Copy all framebuffers to host (output: num_instances × 240 × 256 uint32)
+    // Requires rendering to be enabled. d_fb_out_ is allocated lazily on first call.
     void get_framebuffers(uint32_t* host_output);
 
     // Read back one instance's full state (for debugging/RL observation)
@@ -118,8 +126,13 @@ private:
     uint32_t  prg_size_    = 0;
     uint32_t  chr_size_    = 0;
 
-    // ---- RGBA32 output buffer ----
-    uint32_t* d_fb_out_    = nullptr;  // [N × 240 × 256]
+    // ---- RGBA32 output buffer (lazily allocated on first get_framebuffers call) ----
+    uint32_t* d_fb_out_    = nullptr;  // [N × 240 × 256] — nullptr until first use
+
+    // ---- Rendering mode ----
+    // When false: ppu_framebuffer in SoA is null → ppu_tick skips pixel writes
+    // Saves N×61,440 B of device memory and speeds up GPU for reward-only RL loops.
+    bool rendering_enabled_ = true;
 
     bool rom_loaded_ = false;
 

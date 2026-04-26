@@ -80,8 +80,20 @@ int main(int argc, char** argv) {
     auto prg_rom = make_prg_rom();
     auto chr_rom = make_chr_rom();
 
+    // Optional: disable rendering for pure RL throughput testing
+    bool no_render = false;
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--no_render") == 0) no_render = true;
+    }
+
     // Create batch controller
     NESBatchGpu batch(num_instances);
+    if (no_render) {
+        batch.set_rendering_enabled(false);
+        printf("Rendering:     DISABLED (no framebuffer allocation)\n");
+    } else {
+        printf("Rendering:     ENABLED\n");
+    }
     batch.load_rom(prg_rom.data(), (uint32_t)prg_rom.size(),
                    chr_rom.data(), (uint32_t)chr_rom.size());
     batch.reset_all(MIRROR_HORIZONTAL);
@@ -149,6 +161,7 @@ int main(int argc, char** argv) {
         if (n > num_instances) continue;
 
         NESBatchGpu sweep_batch(n);
+        if (no_render) sweep_batch.set_rendering_enabled(false);
         sweep_batch.load_rom(prg_rom.data(), (uint32_t)prg_rom.size(),
                               chr_rom.data(), (uint32_t)chr_rom.size());
         sweep_batch.reset_all(MIRROR_HORIZONTAL);

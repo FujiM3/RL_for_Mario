@@ -501,7 +501,7 @@ __device__ void ppu_tick(NESPPUState* ppu, const uint8_t* chr_rom) {
             ppu_evaluate_sprites(ppu, chr_rom);
             return;
         }
-        if (ppu->cycle <= 256) {
+        if (ppu->cycle <= 256 && ppu->framebuffer) {
             int x = ppu->cycle - 1;
             if ((x & 7) == 0) {
                 ppu_render_background_tile(ppu, chr_rom, x >> 3, ppu->scanline);

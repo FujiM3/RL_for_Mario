@@ -128,7 +128,9 @@ __device__ __forceinline__ void soa_load_ppu(const NESBatchStatesSoA* soa, int i
     ppu->palette         = soa->ppu_palette + (size_t)idx * NES_PALETTE_SIZE;
     ppu->oam             = soa->ppu_oam     + (size_t)idx * NES_OAM_SIZE;
     ppu->active_sprites  = soa->ppu_active_sprites + (size_t)idx * NES_MAX_SPRITES;
-    ppu->framebuffer     = soa->ppu_framebuffer + (size_t)idx * NES_FRAMEBUFFER_SIZE;
+    ppu->framebuffer     = soa->ppu_framebuffer
+                             ? soa->ppu_framebuffer + (size_t)idx * NES_FRAMEBUFFER_SIZE
+                             : nullptr;
 }
 
 __device__ __forceinline__ void soa_store_ppu(NESBatchStatesSoA* soa, int idx,
