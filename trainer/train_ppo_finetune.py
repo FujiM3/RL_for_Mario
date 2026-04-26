@@ -50,9 +50,10 @@ def get_default_config(use_gpu: bool = False) -> dict:
     cfg = {
         # 环境
         "num_envs":            2048 if use_gpu else 16,
-        # GPU模式: rollout_steps=64 → 131K步/rollout (3.7GB obs buffer vs 14.8GB for 256)
+        # GPU模式: rollout_steps=128 → 262K步/rollout (7.4GB CPU obs buffer)
+        #   更长的GAE窗口 → 更好的信用分配
         # CPU模式: rollout_steps=2048 → 32K步/rollout
-        "rollout_steps":       64 if use_gpu else 2048,
+        "rollout_steps":       128 if use_gpu else 2048,
         "total_timesteps":     10_000_000,
 
         # 模型
@@ -65,17 +66,17 @@ def get_default_config(use_gpu: bool = False) -> dict:
         "head_lr":             3e-4,
         "max_grad_norm":       0.5,
 
-        # PPO
+        # PPO — 奖励已裁剪到 [-1, 1]，ent_coef 降低以允许策略收敛
         "clip_coef":           0.1,
-        "ent_coef":            0.1,    # 0.05 → 0.1，进一步抑制策略过早收敛
+        "ent_coef":            0.05,   # 0.1 → 0.05，奖励信号正常后减少熵正则
         "vf_coef":             0.5,
-        "update_epochs":       4,
-        "minibatch_size":      2048 if use_gpu else 512,  # GPU: larger batch → better Tensor Core util
+        "update_epochs":       8,      # 4 → 8，更多梯度步提升样本效率
+        "minibatch_size":      4096 if use_gpu else 512,  # 2048→4096: 更好Tensor Core利用率
         "gamma":               0.99,
         "gae_lambda":          0.95,
 
         # Encoder 冻结策略
-        "freeze_encoder_steps":  1_000_000,   # 前 100 万步冻结 encoder
+        "freeze_encoder_steps":  500_000,   # 1M → 500K，DT特征已够好，更早微调
 
         # 课程学习 (仅 CPU 模式；GPU 固定 World 1-1)
         "curriculum_threshold":  0.6,
@@ -85,7 +86,7 @@ def get_default_config(use_gpu: bool = False) -> dict:
         # 路径
         "dt_checkpoint":  "trained_models/dt_mario_pro_hs512_L6_best.pth",
         "out_dir":        "trainer/out/ppo_finetune",
-        "save_interval":  50,      # 每 N 轮 rollout 保存一次
+        "save_interval":  20,      # 每 N 轮 rollout 保存一次（更频繁，因为rollout更长）
         "log_interval":   1,       # 每轮都打印
 
         # GPU 模式标志
