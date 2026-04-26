@@ -55,3 +55,4 @@ nes_emulator_gpu/build/
 *.cubin
 *.ptx
 *.fatbin
+trained_models/*.pth
