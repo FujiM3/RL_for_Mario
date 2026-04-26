@@ -1,7 +1,7 @@
 # 🎯 NES GPU模拟器项目 - 当前状态
 
-**最后更新**: 2026-04-26 03:00  
-**当前阶段**: Phase 2 - PPU参考实现  
+**最后更新**: 2026-04-26 (Phase 3完成)
+**当前阶段**: Phase 3 - GPU单实例移植  
 **项目启动日期**: 2026-04-24
 
 ---
@@ -11,13 +11,13 @@
 ```
 Phase 0: 研究和准备        [██████████] 100% ✅ 完成
 Phase 1: CPU参考实现       [██████████] 100% ✅ 完成
-Phase 2: PPU参考实现       [████████  ]  83% 🚧 当前 (Task 2.1-2.5完成 + 优化)
-Phase 3: GPU单实例移植     [          ]   0% ⏳
+Phase 2: PPU参考实现       [██████████] 100% ✅ 完成 (136/136 tests)
+Phase 3: GPU单实例移植     [██████████] 100% ✅ 完成 (10/10 GPU tests)
 Phase 4: GPU批量并行       [          ]   0% ⏳
 Phase 5: Python API        [          ]   0% ⏳
 Phase 6: PPO集成           [          ]   0% ⏳
 
-总体进度: 61% (Phase 0+1完成, Phase 2 83%完成)
+总体进度: 75% (Phase 0-3完成)
 ```
 
 ---
@@ -374,6 +374,60 @@ nes_emulator_gpu/
 
 ---
 
-**状态总结**: Phase 0和Phase 1完美完成 (100%)，Phase 2进行中 (67%完成，Task 2.1-2.4已完成含优化)。完整的6502 CPU模拟器已完成 (3504行代码，73/73测试通过)。PPU基础架构、背景渲染、精灵渲染、滚动镜像系统已完成 (3700行代码，136/136测试通过)。
+**状态总结**: Phase 0-3全部完成 ✅。Phase 3 GPU单实例移植100%完成：10/10 GPU测试通过，单实例基准测试 ~29 SPS。Phase 4将并行运行~1000实例，目标120×加速（≥30,240 SPS）。
 
-**下次工作恢复时**: 阅读本文件 + `phases/phase2_ppu/work_log_004.md` + `phases/phase2_ppu/work_log_004_scroll_optimization.md` 即可快速了解进度。准备开始Task 2.5: NMI和定时系统。
+**下次工作恢复时**: 阅读本文件 + `phases/phase3_cuda_single/work_log_001.md` 即可快速了解进度。准备开始Phase 4: GPU批量并行。
+
+---
+
+## ✅ Phase 3 已完成 - GPU单实例移植
+
+**目标**: 将C++ OOP参考实现移植到CUDA device函数（平坦struct + 自由`__device__`函数）
+**实际时间**: ~4小时  
+**最终进度**: 100% ✅
+
+### 完成内容
+
+✅ **nes_state.h**: NESCPUState, NESPPUState, NESState, NESROMData平坦结构体
+✅ **ppu_device.cuh**: PPU完整`__device__`实现（含NES_PALETTE_CONST `__constant__`内存）
+✅ **cpu_device.cuh**: 6502 CPU全部56个opcode的`__device__` switch实现（~900行）
+✅ **nes_frame_kernel.cu**: 4个CUDA kernels（nes_run_frame, nes_reset, nes_get_framebuffer, nes_step_frames）
+✅ **nes_gpu.h / nes_gpu.cu**: NESGpu主机类（管理device内存、kernel启动、framebuffer传输）
+✅ **CMakeLists.txt**: 添加CUDA支持（cmake 3.16, CC 70, 分离式编译）
+✅ **test_gpu_single.cu**: 10个GPU集成测试（GTest）
+✅ **bench_gpu_single.cu**: 单实例基准测试
+
+### 测试结果
+
+```
+[ PASSED ] 10 tests (10/10)
+  - ResetSetsPC ✅
+  - ResetInitializesRegisters ✅
+  - ResetClearsPPU ✅
+  - RunOneFrameCompletes ✅
+  - VBlankOccursDuringFrame ✅
+  - FramebufferNotAllBlack ✅
+  - MultipleFramesAdvanceState ✅
+  - PPUMirroringIsSet ✅
+  - PPURegisterWriteWorks ✅
+  - PPUVBlankTriggersNMI ✅
+```
+
+### 基准测试结果 (Tesla V100-PCIE-32GB)
+
+```
+Phase 3 (1 GPU线程, 1 NES实例):
+  逐帧启动:  28.6 SPS  (0.11× vs nes_py 252 SPS)
+  批量执行:  29.0 SPS  (0.11× vs nes_py 252 SPS)
+```
+
+**符合预期**: 单GPU线程比CPU慢（GPU设计为大规模并行，非单线程延迟）。
+**Phase 4展望**: 1000个并行实例 × 29 SPS ≈ 29,000 SPS（115×加速）。
+
+### 关键架构决策
+
+1. **无std::function**: chr_read回调替换为原始`const uint8_t* chr_rom`指针
+2. **无OOP**: C++类→平坦struct + 自由`__device__`函数
+3. **无动态分配**: 固定大小数组
+4. **`__constant__`内存**: 256项NES调色板（快速广播读取）
+5. **测试辅助kernel**: 放置在nes_frame_kernel.cu避免nvlink多重定义错误

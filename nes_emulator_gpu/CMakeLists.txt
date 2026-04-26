@@ -1,15 +1,39 @@
-cmake_minimum_required(VERSION 3.14)
-project(NES_GPU_Emulator VERSION 0.1.0 LANGUAGES CXX)
+cmake_minimum_required(VERSION 3.16)
+
+# Detect CUDA compiler before project() declaration
+if(NOT DEFINED CMAKE_CUDA_COMPILER)
+    find_program(NVCC_EXE nvcc PATHS /usr/local/cuda/bin)
+    if(NVCC_EXE)
+        set(CMAKE_CUDA_COMPILER ${NVCC_EXE})
+    endif()
+endif()
+
+# Determine project languages
+if(CMAKE_CUDA_COMPILER)
+    project(NES_GPU_Emulator VERSION 0.1.0 LANGUAGES CXX CUDA)
+else()
+    project(NES_GPU_Emulator VERSION 0.1.0 LANGUAGES CXX)
+endif()
 
 # C++17 required
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+# CUDA settings (Tesla V100: Compute Capability 7.0)
+set(CMAKE_CUDA_STANDARD 14)
+set(CMAKE_CUDA_STANDARD_REQUIRED ON)
+set(CMAKE_CUDA_ARCHITECTURES 70)
+
 # Compiler flags
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -Wextra -pedantic")
 set(CMAKE_CXX_FLAGS_DEBUG "-g -O0 -DDEBUG")
 set(CMAKE_CXX_FLAGS_RELEASE "-O3 -DNDEBUG -march=native")
+
+# CUDA compiler flags
+set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -Xcompiler -Wall")
+set(CMAKE_CUDA_FLAGS_DEBUG "-g -G -O0")
+set(CMAKE_CUDA_FLAGS_RELEASE "-O3 -DNDEBUG")
 
 # Output directories
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
@@ -104,10 +128,81 @@ if(TEST_SOURCES)
     gtest_discover_tests(nes_tests)
 endif()
 
+# ============================================================================
+# CUDA: Phase 3 GPU Single Instance
+# ============================================================================
+
+find_package(CUDAToolkit QUIET HINTS /usr/local/cuda)
+
+if(CUDAToolkit_FOUND OR CMAKE_CUDA_COMPILER)
+    message(STATUS "CUDA found: ${CUDAToolkit_VERSION} at ${CUDAToolkit_ROOT_DIR}")
+
+    # Include directories for CUDA code
+    set(CUDA_INCLUDE_DIRS
+        ${PROJECT_SOURCE_DIR}/src/cuda
+        ${PROJECT_SOURCE_DIR}/src/reference
+    )
+
+    # GPU library: host interface + kernels
+    add_library(nes_gpu_lib STATIC
+        src/cuda/host/nes_gpu.cu
+        src/cuda/kernels/nes_frame_kernel.cu
+    )
+    target_include_directories(nes_gpu_lib PUBLIC ${CUDA_INCLUDE_DIRS})
+    set_target_properties(nes_gpu_lib PROPERTIES
+        CUDA_SEPARABLE_COMPILATION ON
+    )
+    if(CUDAToolkit_FOUND)
+        target_link_libraries(nes_gpu_lib CUDA::cudart)
+    else()
+        target_link_libraries(nes_gpu_lib ${CUDA_LIBRARIES})
+    endif()
+
+    # CUDA integration tests
+    if(EXISTS ${PROJECT_SOURCE_DIR}/tests/cuda/test_gpu_single.cu)
+        add_executable(nes_gpu_tests tests/cuda/test_gpu_single.cu)
+        target_include_directories(nes_gpu_tests PRIVATE ${CUDA_INCLUDE_DIRS})
+        set_target_properties(nes_gpu_tests PROPERTIES
+            CUDA_SEPARABLE_COMPILATION ON
+        )
+        if(CUDAToolkit_FOUND)
+            target_link_libraries(nes_gpu_tests nes_gpu_lib GTest::gtest_main CUDA::cudart)
+        else()
+            target_link_libraries(nes_gpu_tests nes_gpu_lib GTest::gtest_main ${CUDA_LIBRARIES})
+        endif()
+        gtest_discover_tests(nes_gpu_tests)
+        message(STATUS "CUDA tests: enabled")
+    endif()
+
+    # GPU benchmark
+    if(EXISTS ${PROJECT_SOURCE_DIR}/benchmarks/bench_gpu_single.cu)
+        add_executable(bench_gpu_single benchmarks/bench_gpu_single.cu)
+        target_include_directories(bench_gpu_single PRIVATE ${CUDA_INCLUDE_DIRS})
+        set_target_properties(bench_gpu_single PROPERTIES
+            CUDA_SEPARABLE_COMPILATION ON
+        )
+        if(CUDAToolkit_FOUND)
+            target_link_libraries(bench_gpu_single nes_gpu_lib CUDA::cudart)
+        else()
+            target_link_libraries(bench_gpu_single nes_gpu_lib ${CUDA_LIBRARIES})
+        endif()
+        message(STATUS "GPU benchmark: enabled")
+    endif()
+
+else()
+    message(STATUS "CUDA not found - skipping GPU targets")
+endif()
+
+# ============================================================================
 # Print configuration
+# ============================================================================
 message(STATUS "=== NES GPU Emulator Configuration ===")
 message(STATUS "Build type: ${CMAKE_BUILD_TYPE}")
 message(STATUS "C++ compiler: ${CMAKE_CXX_COMPILER}")
 message(STATUS "C++ standard: C++${CMAKE_CXX_STANDARD}")
-message(STATUS "Compiler flags: ${CMAKE_CXX_FLAGS}")
+message(STATUS "CUDA found: ${CUDAToolkit_FOUND}")
+if(CUDAToolkit_FOUND)
+    message(STATUS "CUDA version: ${CUDAToolkit_VERSION}")
+    message(STATUS "CUDA architectures: ${CMAKE_CUDA_ARCHITECTURES}")
+endif()
 message(STATUS "====================================")
