@@ -5,14 +5,25 @@
  * Each CUDA block (1 thread per block) handles one NES instance.
  *
  * Grid layout:
- *   gridDim.x  = num_instances (up to 1024)
- *   blockDim.x = 1 (one thread per NES — preserves Phase 3 correctness)
+ *   gridDim.x  = num_instances
+ *   blockDim.x = 1 (one thread per block)
  *
- * Each instance has its own NESState (~248KB). With 1000 instances:
- *   1000 × 248KB ≈ 248MB device memory (fits in V100 32GB)
+ * WHY 1 THREAD PER BLOCK:
+ * NES state is Array-of-Structures (AoS), 4.5KB per instance. If multiple
+ * threads in the same warp each handle a different instance, their state
+ * accesses are strided by 4.5KB — 32 non-coalesced memory transactions per
+ * warp instruction instead of 1. This overwhelms the memory controller and
+ * causes severe bandwidth regression.
+ *
+ * With 1 thread per block, each SM schedules ≤32 blocks concurrently. Each
+ * block has its own warp with 1 active thread — no coalescing issue. The GPU
+ * hides latency by switching between the 32 active warps.
+ *
+ * The path to further improvement is Structure-of-Arrays (SoA) state layout
+ * so that all instances' `ppu.cycle` values are stored contiguously, enabling
+ * true coalesced access. That would allow larger block sizes to be beneficial.
  *
  * Phase 4 target: 30,240 SPS (120× vs nes_py 252 SPS)
- * Phase 3 baseline: 29 SPS × 1000 = ~29,000 SPS (projected ~115×)
  */
 
 #include "device/nes_state.h"

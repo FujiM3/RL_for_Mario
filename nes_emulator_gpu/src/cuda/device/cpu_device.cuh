@@ -60,9 +60,9 @@ __device__ uint8_t cpu_read(NESCPUState* cpu, NESPPUState* ppu,
         return 0u;  // Controller (stub)
     } else if (addr >= 0x8000u) {
         if (prg_size == 0x4000u) {
-            return prg_rom[(addr - 0x8000u) & 0x3FFFu];  // 16KB mirrored
+            return __ldg(&prg_rom[(addr - 0x8000u) & 0x3FFFu]);  // 16KB mirrored
         }
-        return prg_rom[addr - 0x8000u];  // 32KB
+        return __ldg(&prg_rom[addr - 0x8000u]);  // 32KB
     }
     return 0u;
 }

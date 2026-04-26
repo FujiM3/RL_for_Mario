@@ -19,8 +19,9 @@ Phase 3 (GPU单实例):           ~30 SPS   (0.1×, 单线程)
   ↓ Phase 4.0: 批量并行基线    26,000 SPS @ 1k inst  (103×)
   ↓ 优化1: uint32→uint8帧缓冲  27,000 SPS @ 1k inst  (107×) [+4%]
   ↓ 优化2: 帧缓冲指针化        24,000 SPS @ 1k inst  (95×)  [-10%, 见分析]
-  ↓ 优化2@5k inst              47,000 SPS @ 5k inst  (187×)
-  ↓ 最佳 (10k instances)      ~50,000 SPS            (198×)
+  ↓ 优化3: __ldg()只读缓存     25,000 SPS @ 1k inst  (99×)  [+4%, 噪声范围内]
+  ↓ 最佳 (2k instances)        40,000 SPS             (160×) ✅
+  ↓ 最佳 (10k instances)      ~50,000 SPS             (198×)
 ```
 
 ---
@@ -198,8 +199,52 @@ cudaMalloc(&d_fb_pool_, (size_t)num_instances_ * NES_FRAMEBUFFER_SIZE);
 |------|---------|
 | L2缓存 (6MB) | NES状态数据（1k inst = 4.5MB ≈ 6MB） |
 | `__constant__` memory | NES调色板64色 RGBA (256B) |
+| 只读数据缓存 (L1) | PRG/CHR ROM (`__ldg()` 读取) |
 | 全局内存带宽 | 帧缓冲写入、ROM读取 |
 | SM (80个) | 每SM处理多个实例 (1k/80 ≈ 12.5/SM) |
+
+---
+
+## 🧪 优化3: `__ldg()` 只读缓存提示
+
+**实现**: 对 PRG ROM 和 CHR ROM 的所有读取添加 `__ldg()` 编译器提示，让编译器使用专用只读数据缓存（L1纹理缓存）而非通用数据缓存。
+
+```cpp
+// cpu_device.cuh
+return __ldg(&prg_rom[(addr - 0x8000u) & 0x3FFFu]);
+
+// ppu_device.cuh
+return chr_rom ? __ldg(&chr_rom[addr]) : 0u;
+*lo_out = chr_rom ? __ldg(&chr_rom[tile_addr + fine_y]) : 0u;
+```
+
+**结果**: 性能提升在噪声范围内（25k vs 24k SPS），因为ROM数据已经被L2缓存有效覆盖。
+**保留**: 代码语义更明确（显式标注只读），无性能损失。
+
+---
+
+## ❌ 实验4: Block Size 扩大 (128线程/块)
+
+**假设**: 将 `<<<N, 1>>>` 改为 `<<<N/128, 128>>>` 可提高SM利用率（从32线程/SM → 2048线程/SM），通过更多warp数量隐藏内存延迟。
+
+**结果**: **2.4× 性能倒退** (25k → 11k SPS)
+
+**根本原因: AoS布局导致非合并访问**
+
+```
+当128个线程处于同一warp并各自访问不同NESState时：
+  线程0: state[0].ppu.cycle  → 地址 0×4504 + offset
+  线程1: state[1].ppu.cycle  → 地址 1×4504 + offset   (步长: 4504 bytes!)
+  线程2: state[2].ppu.cycle  → 地址 2×4504 + offset
+  ...32个线程跨越: 32 × 4504 = 144,128 字节
+  
+GPU需要32次独立cache line加载，而非1次合并加载
+每个warp指令产生32× 内存事务开销！
+```
+
+**与原方案对比 (`<<<N, 1>>>`)**: 每个warp只有1个活跃线程，不存在合并问题，1次内存访问即可。
+
+**正确解法**: Structure-of-Arrays (SoA) 布局，将所有实例的 `ppu.cycle` 存储在连续内存中。SoA重构是大工程，暂缓实施。
 
 ---
 
@@ -218,10 +263,17 @@ nes_gpu_batch_tests (Phase 4 批量): 8/8 PASSED  ✅
 Phase 4 GPU批量并行优化**成功超额完成120×目标**：
 
 - **最佳性能**: ~198× speedup (10,000 instances)
-- **实用性能**: 161× speedup (2,000 instances，典型RL训练规模)
+- **实用性能**: 160× speedup (2,000 instances，典型RL训练规模)
 - **120×目标**: 在1,200+实例时达成
 
 主要优化贡献：
 1. **批量并行架构**（Phase 4基线）: 0.1× → 103×（最大贡献）
 2. **uint8帧缓冲**（优化1）: +4-8%
-3. **指针化帧缓冲**（优化2）: -6-9%（换取代码架构优化，性能轻微下降）
+3. **指针化帧缓冲**（优化2）: -6-9%（换取代码架构优化）
+4. **`__ldg()` 只读缓存**（优化3）: 噪声范围内，语义清晰
+5. **Block Size 128**（实验，已回退）: -58% → AoS布局下适得其反
+
+**未来优化方向（如需进一步提升）**:
+- Structure-of-Arrays (SoA) 状态布局 → 消除非合并访问，支持大block size
+- 共享内存缓存PRG ROM（结合SoA + 32线程/块）
+- Python API (Phase 5) → 实际RL训练集成

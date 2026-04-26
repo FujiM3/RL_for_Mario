@@ -131,7 +131,7 @@ __device__ __forceinline__ uint8_t ppu_mem_read(const NESPPUState* ppu,
                                                   uint16_t addr) {
     addr &= 0x3FFFu;
     if (addr < 0x2000u) {
-        return chr_rom ? chr_rom[addr] : 0u;
+        return chr_rom ? __ldg(&chr_rom[addr]) : 0u;
     } else if (addr < 0x3F00u) {
         return ppu->vram[ppu_mirror_nametable(ppu, addr)];
     } else {
@@ -306,8 +306,8 @@ __device__ __forceinline__ void ppu_get_pattern_tile(const NESPPUState* ppu,
                                                       uint8_t* hi_out) {
     uint16_t pattern_base = (ppu->ctrl & 0x10u) ? 0x1000u : 0x0000u;
     uint16_t tile_addr = pattern_base + (uint16_t)(tile_index * 16);
-    *lo_out = chr_rom ? chr_rom[tile_addr + fine_y]     : 0u;
-    *hi_out = chr_rom ? chr_rom[tile_addr + fine_y + 8] : 0u;
+    *lo_out = chr_rom ? __ldg(&chr_rom[tile_addr + fine_y])     : 0u;
+    *hi_out = chr_rom ? __ldg(&chr_rom[tile_addr + fine_y + 8]) : 0u;
 }
 
 // ---------------------------------------------------------------------------
@@ -377,8 +377,8 @@ __device__ __forceinline__ uint16_t ppu_get_sprite_pattern(const NESPPUState* pp
     if (vflip) fine_y = 7 - fine_y;
     uint16_t base = (ppu->ctrl & 0x08u) ? 0x1000u : 0x0000u;
     uint16_t addr = base + (uint16_t)(tile * 16 + fine_y);
-    uint8_t lo = chr_rom ? chr_rom[addr]     : 0u;
-    uint8_t hi = chr_rom ? chr_rom[addr + 8] : 0u;
+    uint8_t lo = chr_rom ? __ldg(&chr_rom[addr])     : 0u;
+    uint8_t hi = chr_rom ? __ldg(&chr_rom[addr + 8]) : 0u;
     return (uint16_t)((lo << 8) | hi);
 }
 
