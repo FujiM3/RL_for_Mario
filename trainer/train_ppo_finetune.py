@@ -83,7 +83,7 @@ def get_default_config(use_gpu: bool = False) -> dict:
         "curriculum_min_eps":    500,
 
         # 路径
-        "dt_checkpoint":  "trainer/out/mario_dt_v2/dt_mario_v2_hs512_L6_best.pth",
+        "dt_checkpoint":  "trained_models/dt_mario_pro_hs512_L6_best.pth",
         "out_dir":        "trainer/out/ppo_finetune",
         "save_interval":  50,      # 每 N 轮 rollout 保存一次
         "log_interval":   1,       # 每轮都打印
