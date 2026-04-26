@@ -33,9 +33,13 @@
 // ---------------------------------------------------------------------------
 __global__ void nes_run_frame(NESState* state,
                                const uint8_t* prg_rom, uint32_t prg_size,
-                               const uint8_t* chr_rom, uint32_t chr_size) {
+                               const uint8_t* chr_rom, uint32_t chr_size,
+                               uint8_t* framebuf) {
     NESCPUState* cpu = &state->cpu;
     NESPPUState* ppu = &state->ppu;
+
+    // Set framebuffer pointer for this frame
+    ppu->framebuffer = framebuf;
 
     // Clear frame_ready at start so we detect when this frame completes
     ppu->frame_ready = 0;
@@ -62,7 +66,7 @@ __global__ void nes_run_frame(NESState* state,
         }
     }
 
-    // Frame is complete: ppu->framebuffer contains the rendered frame
+    // Frame is complete: framebuf[] contains palette indices for this frame
 }
 
 // ---------------------------------------------------------------------------
@@ -104,9 +108,12 @@ __global__ void nes_get_framebuffer(const NESState* state, uint32_t* output) {
 __global__ void nes_step_frames(NESState* state,
                                  const uint8_t* prg_rom, uint32_t prg_size,
                                  const uint8_t* chr_rom, uint32_t chr_size,
-                                 int num_frames) {
+                                 int num_frames, uint8_t* framebuf) {
     NESCPUState* cpu = &state->cpu;
     NESPPUState* ppu = &state->ppu;
+
+    // Set framebuffer pointer once (reused across all frames)
+    ppu->framebuffer = framebuf;
 
     for (int frame = 0; frame < num_frames; frame++) {
         ppu->frame_ready = 0;

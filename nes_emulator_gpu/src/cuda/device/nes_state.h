@@ -98,10 +98,11 @@ struct NESPPUState {
     uint8_t  palette[NES_PALETTE_SIZE];     // 32-byte palette RAM
     uint8_t  oam[NES_OAM_SIZE];             // 256-byte Object Attribute Memory
 
-    // ---- Output framebuffer (256×240, palette index 0-63 per pixel) ----
-    // Stores NES palette index (uint8_t) to minimize state size (60KB vs 240KB).
+    // ---- Output framebuffer (pointer to 256×240 palette-index buffer) ----
+    // Framebuffer lives in a separate device allocation to reduce NESState size.
+    // Before each frame, the kernel sets this pointer to the instance's slice.
     // Use nes_get_framebuffer / nes_batch_get_framebuffers to get RGBA32 output.
-    uint8_t  framebuffer[NES_FRAMEBUFFER_SIZE];
+    uint8_t* framebuffer;
 
     // ---- Sprite rendering state (rebuilt each scanline) ----
     ActiveSpriteGPU active_sprites[NES_MAX_SPRITES];

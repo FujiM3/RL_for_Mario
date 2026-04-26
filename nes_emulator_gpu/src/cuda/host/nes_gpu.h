@@ -70,11 +70,12 @@ public:
 private:
     void cuda_check(int err, const char* file, int line);
 
-    NESState*  d_state_  = nullptr;    // Device: NES state (~250KB)
-    uint8_t*   d_prg_rom_ = nullptr;   // Device: PRG ROM
-    uint8_t*   d_chr_rom_ = nullptr;   // Device: CHR ROM
-    uint32_t*  d_framebuf_ = nullptr;  // Device: temp framebuffer copy
-    uint32_t*  h_framebuf_ = nullptr;  // Host:   framebuffer staging
+    NESState*  d_state_     = nullptr;  // Device: NES state (~4.5KB after optimization)
+    uint8_t*   d_prg_rom_   = nullptr;  // Device: PRG ROM
+    uint8_t*   d_chr_rom_   = nullptr;  // Device: CHR ROM
+    uint8_t*   d_fb_palette_ = nullptr; // Device: palette-index framebuffer (60KB)
+    uint32_t*  d_framebuf_  = nullptr;  // Device: RGBA32 output framebuffer
+    uint32_t*  h_framebuf_  = nullptr;  // Host:   framebuffer staging
 
     uint32_t prg_size_ = 0;
     uint32_t chr_size_ = 0;

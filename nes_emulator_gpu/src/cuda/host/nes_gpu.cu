@@ -16,7 +16,8 @@
 // Forward declarations for kernels (defined in nes_frame_kernel.cu)
 __global__ void nes_run_frame(NESState* state,
                                const uint8_t* prg_rom, uint32_t prg_size,
-                               const uint8_t* chr_rom, uint32_t chr_size);
+                               const uint8_t* chr_rom, uint32_t chr_size,
+                               uint8_t* framebuf);
 
 __global__ void nes_reset(NESState* state,
                            const uint8_t* prg_rom, uint32_t prg_size,
@@ -25,7 +26,7 @@ __global__ void nes_reset(NESState* state,
 __global__ void nes_step_frames(NESState* state,
                                  const uint8_t* prg_rom, uint32_t prg_size,
                                  const uint8_t* chr_rom, uint32_t chr_size,
-                                 int num_frames);
+                                 int num_frames, uint8_t* framebuf);
 
 __global__ void nes_get_framebuffer(const NESState* state, uint32_t* output);
 
@@ -56,10 +57,11 @@ NESGpu::NESGpu() {
 
 NESGpu::~NESGpu() {
     // Free device memory
-    if (d_state_)   cudaFree(d_state_);
-    if (d_prg_rom_) cudaFree(d_prg_rom_);
-    if (d_chr_rom_) cudaFree(d_chr_rom_);
-    if (d_framebuf_) cudaFree(d_framebuf_);
+    if (d_state_)      cudaFree(d_state_);
+    if (d_prg_rom_)    cudaFree(d_prg_rom_);
+    if (d_chr_rom_)    cudaFree(d_chr_rom_);
+    if (d_fb_palette_) cudaFree(d_fb_palette_);
+    if (d_framebuf_)   cudaFree(d_framebuf_);
 
     // Free host memory
     delete[] h_framebuf_;
@@ -97,7 +99,11 @@ void NESGpu::load_rom(const uint8_t* prg_rom, uint32_t prg_size,
     CUDA_CHECK(cudaMalloc(&d_state_, sizeof(NESState)));
     CUDA_CHECK(cudaMemset(d_state_, 0, sizeof(NESState)));
 
-    // Allocate device framebuffer copy target
+    // Allocate palette-index framebuffer (60KB) — separate from NESState
+    if (d_fb_palette_) { CUDA_CHECK(cudaFree(d_fb_palette_)); d_fb_palette_ = nullptr; }
+    CUDA_CHECK(cudaMalloc(&d_fb_palette_, NES_FRAMEBUFFER_SIZE * sizeof(uint8_t)));
+
+    // Allocate RGBA32 output buffer (for get_framebuffer kernel)
     if (d_framebuf_) { CUDA_CHECK(cudaFree(d_framebuf_)); d_framebuf_ = nullptr; }
     CUDA_CHECK(cudaMalloc(&d_framebuf_, NES_FRAMEBUFFER_SIZE * sizeof(uint32_t)));
 
@@ -137,7 +143,8 @@ void NESGpu::run_frame() {
 
     cudaEventRecord(reinterpret_cast<cudaEvent_t>(ev_start_));
 
-    nes_run_frame<<<1, 1>>>(d_state_, d_prg_rom_, prg_size_, d_chr_rom_, chr_size_);
+    nes_run_frame<<<1, 1>>>(d_state_, d_prg_rom_, prg_size_, d_chr_rom_, chr_size_,
+                             d_fb_palette_);
     CUDA_CHECK(cudaGetLastError());
 
     cudaEventRecord(reinterpret_cast<cudaEvent_t>(ev_stop_));
@@ -157,7 +164,8 @@ void NESGpu::run_frames(int n) {
 
     cudaEventRecord(reinterpret_cast<cudaEvent_t>(ev_start_));
 
-    nes_step_frames<<<1, 1>>>(d_state_, d_prg_rom_, prg_size_, d_chr_rom_, chr_size_, n);
+    nes_step_frames<<<1, 1>>>(d_state_, d_prg_rom_, prg_size_, d_chr_rom_, chr_size_, n,
+                               d_fb_palette_);
     CUDA_CHECK(cudaGetLastError());
 
     cudaEventRecord(reinterpret_cast<cudaEvent_t>(ev_stop_));

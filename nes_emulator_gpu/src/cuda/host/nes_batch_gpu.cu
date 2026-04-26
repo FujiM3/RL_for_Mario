@@ -28,15 +28,20 @@ NESBatchGpu::NESBatchGpu(int num_instances)
     CUDA_CHECK(cudaMalloc(&d_states_, sizeof(NESState) * num_instances_));
     CUDA_CHECK(cudaMemset(d_states_, 0, sizeof(NESState) * num_instances_));
 
-    // Allocate framebuffer output buffer (used by get_framebuffers)
-    size_t fb_total = (size_t)num_instances_ * 240 * 256 * sizeof(uint32_t);
-    CUDA_CHECK(cudaMalloc(&d_fb_out_, fb_total));
+    // Separate palette-index framebuffer pool (60KB per instance)
+    size_t fb_palette_total = (size_t)num_instances_ * NES_FRAMEBUFFER_SIZE;
+    CUDA_CHECK(cudaMalloc(&d_fb_pool_, fb_palette_total));
+
+    // RGBA32 output buffer (used by get_framebuffers)
+    size_t fb_out_total = (size_t)num_instances_ * NES_FRAMEBUFFER_SIZE * sizeof(uint32_t);
+    CUDA_CHECK(cudaMalloc(&d_fb_out_, fb_out_total));
 }
 
 NESBatchGpu::~NESBatchGpu() {
     if (d_states_)  cudaFree(d_states_);
     if (d_prg_)     cudaFree(d_prg_);
     if (d_chr_)     cudaFree(d_chr_);
+    if (d_fb_pool_) cudaFree(d_fb_pool_);
     if (d_fb_out_)  cudaFree(d_fb_out_);
 }
 
@@ -93,7 +98,7 @@ void NESBatchGpu::reset_all(uint8_t mirroring) {
 
 void NESBatchGpu::run_frame_all() {
     nes_batch_run_frame<<<num_instances_, 1>>>(
-        d_states_, d_prg_, prg_size_, d_chr_, chr_size_, num_instances_);
+        d_states_, d_prg_, prg_size_, d_chr_, chr_size_, num_instances_, d_fb_pool_);
     CUDA_CHECK(cudaGetLastError());
     CUDA_CHECK(cudaDeviceSynchronize());
 }
@@ -104,7 +109,8 @@ void NESBatchGpu::run_frame_all() {
 
 void NESBatchGpu::run_frames_all(int num_frames) {
     nes_batch_step_frames<<<num_instances_, 1>>>(
-        d_states_, d_prg_, prg_size_, d_chr_, chr_size_, num_instances_, num_frames);
+        d_states_, d_prg_, prg_size_, d_chr_, chr_size_, num_instances_, num_frames,
+        d_fb_pool_);
     CUDA_CHECK(cudaGetLastError());
     CUDA_CHECK(cudaDeviceSynchronize());
 }
@@ -116,11 +122,11 @@ void NESBatchGpu::run_frames_all(int num_frames) {
 void NESBatchGpu::get_framebuffers(uint32_t* host_output) {
     // Launch: one block per instance, 256 threads per block (one per pixel column)
     nes_batch_get_framebuffers<<<num_instances_, 256>>>(
-        d_states_, d_fb_out_, num_instances_);
+        d_states_, d_fb_out_, num_instances_, d_fb_pool_);
     CUDA_CHECK(cudaGetLastError());
     CUDA_CHECK(cudaDeviceSynchronize());
 
-    size_t fb_total = (size_t)num_instances_ * 240 * 256 * sizeof(uint32_t);
+    size_t fb_total = (size_t)num_instances_ * NES_FRAMEBUFFER_SIZE * sizeof(uint32_t);
     CUDA_CHECK(cudaMemcpy(host_output, d_fb_out_, fb_total, cudaMemcpyDeviceToHost));
 }
 

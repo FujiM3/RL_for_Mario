@@ -35,12 +35,16 @@
 __global__ void nes_batch_run_frame(NESState* states,
                                      const uint8_t* prg_rom, uint32_t prg_size,
                                      const uint8_t* chr_rom, uint32_t chr_size,
-                                     int num_instances) {
+                                     int num_instances,
+                                     uint8_t* fb_pool) {
     int idx = blockIdx.x;
     if (idx >= num_instances) return;
 
     NESCPUState* cpu = &states[idx].cpu;
     NESPPUState* ppu = &states[idx].ppu;
+
+    // Set framebuffer pointer for this instance's slice in the pool
+    ppu->framebuffer = fb_pool + (size_t)idx * NES_FRAMEBUFFER_SIZE;
 
     ppu->frame_ready = 0;
 
@@ -85,12 +89,16 @@ __global__ void nes_batch_step_frames(NESState* states,
                                        const uint8_t* prg_rom, uint32_t prg_size,
                                        const uint8_t* chr_rom, uint32_t chr_size,
                                        int num_instances,
-                                       int num_frames) {
+                                       int num_frames,
+                                       uint8_t* fb_pool) {
     int idx = blockIdx.x;
     if (idx >= num_instances) return;
 
     NESCPUState* cpu = &states[idx].cpu;
     NESPPUState* ppu = &states[idx].ppu;
+
+    // Set framebuffer pointer once (reused across all frames)
+    ppu->framebuffer = fb_pool + (size_t)idx * NES_FRAMEBUFFER_SIZE;
 
     for (int frame = 0; frame < num_frames; frame++) {
         ppu->frame_ready = 0;
@@ -120,12 +128,13 @@ __global__ void nes_batch_step_frames(NESState* states,
 // ---------------------------------------------------------------------------
 __global__ void nes_batch_get_framebuffers(const NESState* states,
                                             uint32_t* output,
-                                            int num_instances) {
+                                            int num_instances,
+                                            const uint8_t* fb_pool) {
     int inst = blockIdx.x;
     int col  = threadIdx.x;
     if (inst >= num_instances || col >= 256) return;
 
-    const uint8_t* fb = states[inst].ppu.framebuffer;
+    const uint8_t* fb = fb_pool + (size_t)inst * NES_FRAMEBUFFER_SIZE;
     uint32_t* out = output + inst * (240 * 256);
 
     for (int row = 0; row < 240; row++) {

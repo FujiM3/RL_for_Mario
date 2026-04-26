@@ -554,5 +554,6 @@ __device__ void ppu_reset(NESPPUState* ppu) {
     for (int i = 0; i < NES_VRAM_SIZE; i++) ppu->vram[i] = 0;
     for (int i = 0; i < NES_PALETTE_SIZE; i++) ppu->palette[i] = 0;
     for (int i = 0; i < NES_OAM_SIZE; i++) ppu->oam[i] = 0;
-    for (int i = 0; i < NES_FRAMEBUFFER_SIZE; i++) ppu->framebuffer[i] = 0;
+    // framebuffer is a pointer to an external buffer; cleared by the frame kernel.
+    ppu->framebuffer = nullptr;
 }

@@ -23,9 +23,9 @@
 // Device functions are compiled into nes_gpu_lib; only nes_state.h needed for struct types.
 
 // Forward declarations for kernels
-__global__ void nes_run_frame(NESState*, const uint8_t*, uint32_t, const uint8_t*, uint32_t);
+__global__ void nes_run_frame(NESState*, const uint8_t*, uint32_t, const uint8_t*, uint32_t, uint8_t*);
 __global__ void nes_reset(NESState*, const uint8_t*, uint32_t, const uint8_t*, uint32_t);
-__global__ void nes_step_frames(NESState*, const uint8_t*, uint32_t, const uint8_t*, uint32_t, int);
+__global__ void nes_step_frames(NESState*, const uint8_t*, uint32_t, const uint8_t*, uint32_t, int, uint8_t*);
 __global__ void nes_get_framebuffer(const NESState* state, uint32_t* output);
 
 // ---------------------------------------------------------------------------
@@ -107,6 +107,7 @@ protected:
     NESState*  d_state  = nullptr;
     uint8_t*   d_prg    = nullptr;
     uint8_t*   d_chr    = nullptr;
+    uint8_t*   d_fb     = nullptr;  // palette-index framebuffer (separate from NESState)
     NESState   h_state;
 
     std::vector<uint8_t> prg_rom;
@@ -127,6 +128,7 @@ protected:
         ASSERT_EQ(cudaMemset(d_state, 0, sizeof(NESState)), cudaSuccess);
         ASSERT_EQ(cudaMalloc(&d_prg, prg_rom.size()), cudaSuccess);
         ASSERT_EQ(cudaMalloc(&d_chr, chr_rom.size()), cudaSuccess);
+        ASSERT_EQ(cudaMalloc(&d_fb, NES_FRAMEBUFFER_SIZE), cudaSuccess);
 
         ASSERT_EQ(cudaMemcpy(d_prg, prg_rom.data(), prg_rom.size(), cudaMemcpyHostToDevice), cudaSuccess);
         ASSERT_EQ(cudaMemcpy(d_chr, chr_rom.data(), chr_rom.size(), cudaMemcpyHostToDevice), cudaSuccess);
@@ -148,6 +150,7 @@ protected:
         if (d_state) cudaFree(d_state);
         if (d_prg)   cudaFree(d_prg);
         if (d_chr)   cudaFree(d_chr);
+        if (d_fb)    cudaFree(d_fb);
     }
 
     // Copy device state to host
@@ -157,7 +160,7 @@ protected:
 
     void run_frame() {
         nes_run_frame<<<1, 1>>>(d_state, d_prg, (uint32_t)prg_rom.size(),
-                                 d_chr, (uint32_t)chr_rom.size());
+                                 d_chr, (uint32_t)chr_rom.size(), d_fb);
         ASSERT_EQ(cudaGetLastError(), cudaSuccess);
         ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
     }

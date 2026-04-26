@@ -24,9 +24,9 @@
 // Device functions are in nes_gpu_lib; only nes_state.h needed for struct types.
 
 // Forward declarations for kernels
-__global__ void nes_run_frame(NESState*, const uint8_t*, uint32_t, const uint8_t*, uint32_t);
+__global__ void nes_run_frame(NESState*, const uint8_t*, uint32_t, const uint8_t*, uint32_t, uint8_t*);
 __global__ void nes_reset(NESState*, const uint8_t*, uint32_t, const uint8_t*, uint32_t);
-__global__ void nes_step_frames(NESState*, const uint8_t*, uint32_t, const uint8_t*, uint32_t, int);
+__global__ void nes_step_frames(NESState*, const uint8_t*, uint32_t, const uint8_t*, uint32_t, int, uint8_t*);
 
 // ---------------------------------------------------------------------------
 // Build minimal test ROM (same as in test_gpu_single.cu)
@@ -106,11 +106,13 @@ int main(int argc, char** argv) {
     NESState* d_state;
     uint8_t*  d_prg;
     uint8_t*  d_chr;
+    uint8_t*  d_fb;
 
     CUDA_CHECK(cudaMalloc(&d_state, sizeof(NESState)));
     CUDA_CHECK(cudaMemset(d_state, 0, sizeof(NESState)));
     CUDA_CHECK(cudaMalloc(&d_prg, prg_rom.size()));
     CUDA_CHECK(cudaMalloc(&d_chr, chr_rom.size()));
+    CUDA_CHECK(cudaMalloc(&d_fb, NES_FRAMEBUFFER_SIZE));
     CUDA_CHECK(cudaMemcpy(d_prg, prg_rom.data(), prg_rom.size(), cudaMemcpyHostToDevice));
     CUDA_CHECK(cudaMemcpy(d_chr, chr_rom.data(), chr_rom.size(), cudaMemcpyHostToDevice));
 
@@ -138,7 +140,7 @@ int main(int argc, char** argv) {
     CUDA_CHECK(cudaEventRecord(t_start));
     for (int i = 0; i < num_frames; i++) {
         nes_run_frame<<<1, 1>>>(d_state, d_prg, (uint32_t)prg_rom.size(),
-                                 d_chr, (uint32_t)chr_rom.size());
+                                 d_chr, (uint32_t)chr_rom.size(), d_fb);
     }
     CUDA_CHECK(cudaEventRecord(t_stop));
     CUDA_CHECK(cudaDeviceSynchronize());
@@ -169,7 +171,7 @@ int main(int argc, char** argv) {
 
     CUDA_CHECK(cudaEventRecord(t_start));
     nes_step_frames<<<1, 1>>>(d_state, d_prg, (uint32_t)prg_rom.size(),
-                               d_chr, (uint32_t)chr_rom.size(), num_frames);
+                               d_chr, (uint32_t)chr_rom.size(), num_frames, d_fb);
     CUDA_CHECK(cudaEventRecord(t_stop));
     CUDA_CHECK(cudaDeviceSynchronize());
     CUDA_CHECK(cudaGetLastError());
@@ -204,6 +206,7 @@ int main(int argc, char** argv) {
     cudaFree(d_state);
     cudaFree(d_prg);
     cudaFree(d_chr);
+    cudaFree(d_fb);
 
     return 0;
 }

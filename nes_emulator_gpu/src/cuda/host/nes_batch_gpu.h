@@ -23,12 +23,12 @@
 
 // Forward declarations for batch kernels
 __global__ void nes_batch_run_frame(NESState*, const uint8_t*, uint32_t,
-                                     const uint8_t*, uint32_t, int);
+                                     const uint8_t*, uint32_t, int, uint8_t*);
 __global__ void nes_batch_reset(NESState*, const uint8_t*, uint32_t,
                                  const uint8_t*, uint32_t, int);
 __global__ void nes_batch_step_frames(NESState*, const uint8_t*, uint32_t,
-                                       const uint8_t*, uint32_t, int, int);
-__global__ void nes_batch_get_framebuffers(const NESState*, uint32_t*, int);
+                                       const uint8_t*, uint32_t, int, int, uint8_t*);
+__global__ void nes_batch_get_framebuffers(const NESState*, uint32_t*, int, const uint8_t*);
 
 class NESBatchGpu {
 public:
@@ -67,10 +67,11 @@ private:
     int num_instances_;
 
     // Device memory
-    NESState* d_states_   = nullptr;  // [num_instances] NESState
-    uint8_t*  d_prg_      = nullptr;
-    uint8_t*  d_chr_      = nullptr;
-    uint32_t* d_fb_out_   = nullptr;  // [num_instances × 240 × 256] framebuffer output
+    NESState* d_states_    = nullptr;  // [num_instances] NESState (~4.5KB each)
+    uint8_t*  d_prg_       = nullptr;
+    uint8_t*  d_chr_       = nullptr;
+    uint8_t*  d_fb_pool_   = nullptr;  // [num_instances × 61440] palette-index pool
+    uint32_t* d_fb_out_    = nullptr;  // [num_instances × 240 × 256] RGBA32 output
 
     uint32_t prg_size_ = 0;
     uint32_t chr_size_ = 0;
