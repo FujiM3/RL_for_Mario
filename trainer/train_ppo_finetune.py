@@ -406,9 +406,8 @@ def train(args):
 
             next_obs, rewards, dones, infos = venv.step(action_np)
 
-            # Reward scaling：与 DT 预训练数据对齐（数据集里 reward 已除以 10）
-            # 原始 Mario reward 最大约 54，除以 10 → ~5.4，与 dataset 一致
-            rewards = rewards / 10.0
+            # Rewards are already in [-1, 1] (clipped in gpu_vec_env), no scaling needed.
+            # (Removed /10 DT-alignment scaling — PPO value head is trained from scratch.)
 
             buffer.add(
                 # GPU mode: D2H obs into pre-allocated pinned CPU buffer (~5ms) then numpy view.

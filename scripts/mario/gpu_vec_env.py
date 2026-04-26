@@ -371,11 +371,13 @@ class GpuMarioVecEnv:
         dones       = died | stage_clear
 
         # Compute rewards (0 for booting instances — no meaningful x progress yet)
+        # Reward clipped to [-1, 1] so death=-1 and x-progress are proportional.
+        # This prevents advantage collapse from the large death penalty.
         x_delta  = (cur_x - self._prev_x).astype(np.float32)
         x_delta[booting] = 0.0
-        rewards  = x_delta / 40.0
-        rewards[died]        -= 15.0
-        rewards[stage_clear] += 15.0
+        rewards  = np.clip(x_delta / 40.0, -1.0, 1.0)
+        rewards[died]        = -1.0
+        rewards[stage_clear] = 1.0
 
         # Build infos
         infos = [
