@@ -56,8 +56,21 @@ __device__ uint8_t cpu_read(NESCPUState* cpu, NESPPUState* ppu,
         return cpu->ram[addr & 0x07FFu];  // 2KB mirrored
     } else if (addr < 0x4000u) {
         return ppu_read_register(ppu, chr_rom, addr);  // PPU registers
-    } else if (addr == 0x4016u || addr == 0x4017u) {
-        return 0u;  // Controller (stub)
+    } else if (addr == 0x4016u) {
+        // Joypad 1 serial read protocol
+        if (cpu->joypad_strobe) {
+            return cpu->joypad1 & 0x01u;  // Strobe active: always return A button
+        }
+        uint8_t bit;
+        if (cpu->joypad_shift < 8u) {
+            bit = (cpu->joypad1 >> cpu->joypad_shift) & 1u;
+            cpu->joypad_shift++;
+        } else {
+            bit = 1u;  // Open bus after 8 reads
+        }
+        return bit;
+    } else if (addr == 0x4017u) {
+        return 0u;  // Joypad 2 stub
     } else if (addr >= 0x8000u) {
         if (prg_size == 0x4000u) {
             return __ldg(&prg_rom[(addr - 0x8000u) & 0x3FFFu]);  // 16KB mirrored
@@ -78,6 +91,14 @@ __device__ void cpu_write(NESCPUState* cpu, NESPPUState* ppu,
         // OAM DMA: copy CPU RAM page to PPU OAM
         ppu_oam_dma(ppu, cpu->ram, value);
         cpu->total_cycles += 513;  // OAM DMA stall cycles
+    } else if (addr == 0x4016u) {
+        // Joypad strobe: bit0=1 latches buttons; bit0=0 begins serial reads
+        if (value & 1u) {
+            cpu->joypad_strobe = 1u;
+        } else if (cpu->joypad_strobe) {
+            cpu->joypad_strobe = 0u;
+            cpu->joypad_shift = 0u;  // Reset for serial read from beginning
+        }
     }
     // Writes to ROM and other addresses ignored in Phase 3
 }

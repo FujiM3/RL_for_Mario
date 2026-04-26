@@ -33,6 +33,10 @@ __global__ void nes_batch_reset(NESBatchStatesSoA*, const uint8_t*, uint32_t,
 __global__ void nes_batch_step_frames(NESBatchStatesSoA*, const uint8_t*, uint32_t,
                                        const uint8_t*, uint32_t, int);
 __global__ void nes_batch_get_framebuffers(const NESBatchStatesSoA*, uint32_t*);
+__global__ void nes_batch_get_obs(const NESBatchStatesSoA*, uint8_t*, int);
+__global__ void nes_batch_reset_selected(NESBatchStatesSoA*, const uint8_t*,
+                                          const uint8_t*, uint32_t,
+                                          const uint8_t*, uint32_t);
 
 class NESBatchGpu {
 public:
@@ -59,13 +63,32 @@ public:
     // Set render output mode (default: rendering enabled)
     // When disabled: ppu_framebuffer is null → pixel writes skipped → faster GPU
     // + saves N × 61,440 bytes of device memory.
-    // Re-enable before calling get_framebuffers().
+    // Re-enable before calling get_framebuffers() or get_obs_batch().
     void set_rendering_enabled(bool enabled);
     bool rendering_enabled() const { return rendering_enabled_; }
 
     // Copy all framebuffers to host (output: num_instances × 240 × 256 uint32)
     // Requires rendering to be enabled. d_fb_out_ is allocated lazily on first call.
     void get_framebuffers(uint32_t* host_output);
+
+    // ---- Phase 7: RL interface ----
+
+    // Set joypad button state for all instances before the next frame.
+    // buttons[i] = bitmask for instance i: A=bit0, B=bit1, Sel=bit2, Start=bit3,
+    //              Up=bit4, Down=bit5, Left=bit6, Right=bit7
+    // n: number of entries (clamped to num_instances_)
+    void set_buttons_batch(const uint8_t* buttons, int n);
+
+    // Copy N × 2048 CPU RAM bytes to host (for extracting position/lives/flags)
+    void get_ram_batch(uint8_t* host_output);
+
+    // Render 84×84 grayscale observations for all instances.
+    // obs_out: N × 84 × 84 uint8 (row-major). Requires rendering enabled.
+    void get_obs_batch(uint8_t* host_output);
+
+    // Selectively reset instances where done_mask[i] != 0.
+    // done_mask: host array of length n (clamped to num_instances_)
+    void reset_selected(const uint8_t* done_mask, int n);
 
     // Read back one instance's full state (for debugging/RL observation)
     void get_state(int instance_idx, NESState& out) const;
@@ -119,6 +142,14 @@ private:
     uint8_t*         d_ppu_oam_          = nullptr;  // [N × NES_OAM_SIZE]
     ActiveSpriteGPU* d_ppu_sprites_      = nullptr;  // [N × NES_MAX_SPRITES]
     uint8_t*         d_ppu_framebuffer_  = nullptr;  // [N × NES_FRAMEBUFFER_SIZE]
+
+    // ---- Joypad SoA arrays ----
+    uint8_t* d_cpu_joypad1_       = nullptr;  // [N] button bitmask
+    uint8_t* d_cpu_joypad_shift_  = nullptr;  // [N] serial shift position
+    uint8_t* d_cpu_joypad_strobe_ = nullptr;  // [N] strobe state
+
+    // ---- Phase 7: observation buffer (lazily allocated) ----
+    uint8_t* d_obs_gray_ = nullptr;  // [N × 84 × 84] uint8 grayscale
 
     // ---- ROM ----
     uint8_t*  d_prg_       = nullptr;

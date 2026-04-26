@@ -63,6 +63,11 @@ void NESBatchGpu::alloc_soa() {
     // d_ppu_framebuffer_: allocated only when rendering is enabled (see set_rendering_enabled)
     // d_fb_out_: lazily allocated on first get_framebuffers() call
 
+    // Joypad arrays
+    CUDA_CHECK(cudaMalloc(&d_cpu_joypad1_,       (size_t)N));
+    CUDA_CHECK(cudaMalloc(&d_cpu_joypad_shift_,  (size_t)N));
+    CUDA_CHECK(cudaMalloc(&d_cpu_joypad_strobe_, (size_t)N));
+
     // Zero all arrays
     CUDA_CHECK(cudaMemset(d_cpu_A_,            0, (size_t)N));
     CUDA_CHECK(cudaMemset(d_cpu_X_,            0, (size_t)N));
@@ -94,6 +99,9 @@ void NESBatchGpu::alloc_soa() {
     CUDA_CHECK(cudaMemset(d_ppu_oam_,         0, (size_t)N * NES_OAM_SIZE));
     CUDA_CHECK(cudaMemset(d_ppu_sprites_,     0, (size_t)N * NES_MAX_SPRITES * sizeof(ActiveSpriteGPU)));
     // ppu_framebuffer initialized to 0 when allocated by set_rendering_enabled
+    CUDA_CHECK(cudaMemset(d_cpu_joypad1_,       0, (size_t)N));
+    CUDA_CHECK(cudaMemset(d_cpu_joypad_shift_,  0, (size_t)N));
+    CUDA_CHECK(cudaMemset(d_cpu_joypad_strobe_, 0, (size_t)N));
 
     // Build the SoA struct on host, then copy to device
     NESBatchStatesSoA h_soa;
@@ -108,6 +116,9 @@ void NESBatchGpu::alloc_soa() {
     h_soa.cpu_nmi_pending   = d_cpu_nmi_pending_;
     h_soa.cpu_irq_pending   = d_cpu_irq_pending_;
     h_soa.cpu_ram           = d_cpu_ram_;
+    h_soa.cpu_joypad1       = d_cpu_joypad1_;
+    h_soa.cpu_joypad_shift  = d_cpu_joypad_shift_;
+    h_soa.cpu_joypad_strobe = d_cpu_joypad_strobe_;
     h_soa.ppu_ctrl                = d_ppu_ctrl_;
     h_soa.ppu_mask                = d_ppu_mask_;
     h_soa.ppu_status              = d_ppu_status_;
@@ -164,6 +175,9 @@ void NESBatchGpu::free_soa() {
     if (d_ppu_nmi_flag_)            { cudaFree(d_ppu_nmi_flag_);            d_ppu_nmi_flag_       = nullptr; }
     if (d_ppu_active_sprite_count_) { cudaFree(d_ppu_active_sprite_count_); d_ppu_active_sprite_count_ = nullptr; }
     if (d_cpu_ram_)         { cudaFree(d_cpu_ram_);         d_cpu_ram_         = nullptr; }
+    if (d_cpu_joypad1_)       { cudaFree(d_cpu_joypad1_);       d_cpu_joypad1_       = nullptr; }
+    if (d_cpu_joypad_shift_)  { cudaFree(d_cpu_joypad_shift_);  d_cpu_joypad_shift_  = nullptr; }
+    if (d_cpu_joypad_strobe_) { cudaFree(d_cpu_joypad_strobe_); d_cpu_joypad_strobe_ = nullptr; }
     if (d_ppu_vram_)        { cudaFree(d_ppu_vram_);        d_ppu_vram_        = nullptr; }
     if (d_ppu_palette_)     { cudaFree(d_ppu_palette_);     d_ppu_palette_     = nullptr; }
     if (d_ppu_oam_)         { cudaFree(d_ppu_oam_);         d_ppu_oam_         = nullptr; }
@@ -190,9 +204,10 @@ NESBatchGpu::NESBatchGpu(int num_instances)
 
 NESBatchGpu::~NESBatchGpu() {
     free_soa();
-    if (d_prg_)    cudaFree(d_prg_);
-    if (d_chr_)    cudaFree(d_chr_);
-    if (d_fb_out_) cudaFree(d_fb_out_);
+    if (d_prg_)      cudaFree(d_prg_);
+    if (d_chr_)      cudaFree(d_chr_);
+    if (d_fb_out_)   cudaFree(d_fb_out_);
+    if (d_obs_gray_) cudaFree(d_obs_gray_);
 }
 
 // ---------------------------------------------------------------------------
@@ -400,4 +415,75 @@ void NESBatchGpu::set_state(int instance_idx, const NESState& state) {
     CUDA_CHECK(cudaMemcpy(d_ppu_active_sprite_count_ + i, &state.ppu.active_sprite_count, sizeof(int), cudaMemcpyHostToDevice));
     // Note: array data (ram, vram, oam) are not transferred by set_state.
     // To transfer array data, use separate array-level accessors or re-run reset.
+}
+
+// ---------------------------------------------------------------------------
+// set_buttons_batch: upload joypad button bitmasks for all instances
+// ---------------------------------------------------------------------------
+
+void NESBatchGpu::set_buttons_batch(const uint8_t* buttons, int n) {
+    int copy_n = (n < num_instances_) ? n : num_instances_;
+    CUDA_CHECK(cudaMemcpy(d_cpu_joypad1_, buttons, (size_t)copy_n, cudaMemcpyHostToDevice));
+    // Reset shift/strobe so the new buttons take effect from next serial read
+    CUDA_CHECK(cudaMemset(d_cpu_joypad_shift_,  0, (size_t)num_instances_));
+    CUDA_CHECK(cudaMemset(d_cpu_joypad_strobe_, 0, (size_t)num_instances_));
+}
+
+// ---------------------------------------------------------------------------
+// get_ram_batch: copy all N × 2048 CPU RAM bytes to host
+// ---------------------------------------------------------------------------
+
+void NESBatchGpu::get_ram_batch(uint8_t* host_output) {
+    CUDA_CHECK(cudaMemcpy(host_output, d_cpu_ram_,
+                          (size_t)num_instances_ * NES_RAM_SIZE,
+                          cudaMemcpyDeviceToHost));
+}
+
+// ---------------------------------------------------------------------------
+// get_obs_batch: render N × 84 × 84 grayscale observations to host
+// ---------------------------------------------------------------------------
+
+void NESBatchGpu::get_obs_batch(uint8_t* host_output) {
+    if (!rendering_enabled_ || !d_ppu_framebuffer_) {
+        throw std::runtime_error("Call set_rendering_enabled(true) before get_obs_batch()");
+    }
+
+    // Lazily allocate grayscale observation buffer
+    if (!d_obs_gray_) {
+        CUDA_CHECK(cudaMalloc(&d_obs_gray_, (size_t)num_instances_ * 84 * 84));
+    }
+
+    dim3 grid(num_instances_, 84, 1);
+    nes_batch_get_obs<<<grid, 84>>>(d_soa_, d_obs_gray_, num_instances_);
+    CUDA_CHECK(cudaGetLastError());
+    CUDA_CHECK(cudaDeviceSynchronize());
+
+    CUDA_CHECK(cudaMemcpy(host_output, d_obs_gray_,
+                          (size_t)num_instances_ * 84 * 84,
+                          cudaMemcpyDeviceToHost));
+}
+
+// ---------------------------------------------------------------------------
+// reset_selected: reset only instances where done_mask[i] != 0
+// ---------------------------------------------------------------------------
+
+void NESBatchGpu::reset_selected(const uint8_t* done_mask, int n) {
+    if (!rom_loaded_) {
+        throw std::runtime_error("Call load_rom() before reset_selected()");
+    }
+
+    int copy_n = (n < num_instances_) ? n : num_instances_;
+
+    uint8_t* d_done_mask = nullptr;
+    CUDA_CHECK(cudaMalloc(&d_done_mask, (size_t)num_instances_));
+    CUDA_CHECK(cudaMemset(d_done_mask, 0, (size_t)num_instances_));
+    CUDA_CHECK(cudaMemcpy(d_done_mask, done_mask, (size_t)copy_n, cudaMemcpyHostToDevice));
+
+    int grid = (num_instances_ + BLOCK_SIZE - 1) / BLOCK_SIZE;
+    nes_batch_reset_selected<<<grid, BLOCK_SIZE>>>(
+        d_soa_, d_done_mask, d_prg_, prg_size_, d_chr_, chr_size_);
+    CUDA_CHECK(cudaGetLastError());
+    CUDA_CHECK(cudaDeviceSynchronize());
+
+    cudaFree(d_done_mask);
 }

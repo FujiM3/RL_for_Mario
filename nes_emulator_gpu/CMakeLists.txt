@@ -201,6 +201,7 @@ if(CUDAToolkit_FOUND OR CMAKE_CUDA_COMPILER)
     target_include_directories(nes_gpu_batch_lib PUBLIC ${CUDA_INCLUDE_DIRS})
     set_target_properties(nes_gpu_batch_lib PROPERTIES
         CUDA_SEPARABLE_COMPILATION ON
+        POSITION_INDEPENDENT_CODE ON
     )
     if(CUDAToolkit_FOUND)
         target_link_libraries(nes_gpu_batch_lib CUDA::cudart)

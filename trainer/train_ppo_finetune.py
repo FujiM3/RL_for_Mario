@@ -62,13 +62,13 @@ def get_default_config(use_gpu: bool = False) -> dict:
         "act_dim":             7,
 
         # 优化器
-        "encoder_lr":          1e-5,
-        "head_lr":             3e-4,
+        "encoder_lr":          3e-5,
+        "head_lr":             1e-3,
         "max_grad_norm":       0.5,
 
         # PPO — 奖励已裁剪到 [-1, 1]，ent_coef 降低以允许策略收敛
         "clip_coef":           0.1,
-        "ent_coef":            0.05,   # 0.1 → 0.05，奖励信号正常后减少熵正则
+        "ent_coef":            0.01,   # 0.1 → 0.05，奖励信号正常后减少熵正则
         "vf_coef":             0.5,
         "update_epochs":       8,      # 4 → 8，更多梯度步提升样本效率
         "minibatch_size":      4096 if use_gpu else 512,  # 2048→4096: 更好Tensor Core利用率

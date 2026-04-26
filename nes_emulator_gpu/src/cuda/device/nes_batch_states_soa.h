@@ -47,6 +47,11 @@ struct NESBatchStatesSoA {
     // ---- CPU large array ----
     uint8_t*  cpu_ram;            // [N × NES_RAM_SIZE]  AoS layout
 
+    // ---- CPU joypad arrays ----
+    uint8_t*  cpu_joypad1;        // [N] current button bitmask
+    uint8_t*  cpu_joypad_shift;   // [N] serial shift position
+    uint8_t*  cpu_joypad_strobe;  // [N] strobe state
+
     // ---- PPU scalar fields — each is a [num_instances] array ----
     uint8_t*  ppu_ctrl;           // $2000 PPUCTRL
     uint8_t*  ppu_mask;           // $2001 PPUMASK
@@ -89,6 +94,9 @@ __device__ __forceinline__ void soa_load_cpu(const NESBatchStatesSoA* soa, int i
     cpu->nmi_pending  = soa->cpu_nmi_pending[idx];
     cpu->irq_pending  = soa->cpu_irq_pending[idx];
     cpu->ram          = soa->cpu_ram + (size_t)idx * NES_RAM_SIZE;
+    cpu->joypad1      = soa->cpu_joypad1[idx];
+    cpu->joypad_shift  = soa->cpu_joypad_shift[idx];
+    cpu->joypad_strobe = soa->cpu_joypad_strobe[idx];
 }
 
 __device__ __forceinline__ void soa_store_cpu(NESBatchStatesSoA* soa, int idx,
@@ -102,6 +110,9 @@ __device__ __forceinline__ void soa_store_cpu(NESBatchStatesSoA* soa, int idx,
     soa->cpu_total_cycles[idx] = cpu->total_cycles;
     soa->cpu_nmi_pending[idx]  = cpu->nmi_pending;
     soa->cpu_irq_pending[idx]  = cpu->irq_pending;
+    soa->cpu_joypad1[idx]      = cpu->joypad1;
+    soa->cpu_joypad_shift[idx]  = cpu->joypad_shift;
+    soa->cpu_joypad_strobe[idx] = cpu->joypad_strobe;
     // cpu->ram is a pointer into SoA; writes during frame already went to SoA
 }
 
