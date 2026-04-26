@@ -89,7 +89,9 @@ __global__ void nes_get_framebuffer(const NESState* state, uint32_t* output) {
     int row = blockIdx.x;
     int col = threadIdx.x;
     if (row < 240 && col < 256) {
-        output[row * 256 + col] = state->ppu.framebuffer[row * 256 + col];
+        // Convert palette index → RGBA32 using __constant__ palette lookup
+        uint8_t idx = state->ppu.framebuffer[row * 256 + col];
+        output[row * 256 + col] = NES_PALETTE_CONST[idx];
     }
 }
 

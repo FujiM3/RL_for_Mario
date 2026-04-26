@@ -189,6 +189,56 @@ if(CUDAToolkit_FOUND OR CMAKE_CUDA_COMPILER)
         message(STATUS "GPU benchmark: enabled")
     endif()
 
+    # ============================================================================
+    # CUDA: Phase 4 GPU Batch Parallel
+    # ============================================================================
+
+    # Batch GPU library: adds batch kernels + host class
+    add_library(nes_gpu_batch_lib STATIC
+        src/cuda/host/nes_batch_gpu.cu
+        src/cuda/kernels/nes_batch_kernel.cu
+    )
+    target_include_directories(nes_gpu_batch_lib PUBLIC ${CUDA_INCLUDE_DIRS})
+    set_target_properties(nes_gpu_batch_lib PROPERTIES
+        CUDA_SEPARABLE_COMPILATION ON
+    )
+    if(CUDAToolkit_FOUND)
+        target_link_libraries(nes_gpu_batch_lib CUDA::cudart)
+    else()
+        target_link_libraries(nes_gpu_batch_lib ${CUDA_LIBRARIES})
+    endif()
+
+    # Batch GPU tests
+    if(EXISTS ${PROJECT_SOURCE_DIR}/tests/cuda/test_gpu_batch.cu)
+        add_executable(nes_gpu_batch_tests tests/cuda/test_gpu_batch.cu)
+        target_include_directories(nes_gpu_batch_tests PRIVATE ${CUDA_INCLUDE_DIRS})
+        set_target_properties(nes_gpu_batch_tests PROPERTIES
+            CUDA_SEPARABLE_COMPILATION ON
+        )
+        if(CUDAToolkit_FOUND)
+            target_link_libraries(nes_gpu_batch_tests nes_gpu_batch_lib GTest::gtest_main CUDA::cudart)
+        else()
+            target_link_libraries(nes_gpu_batch_tests nes_gpu_batch_lib GTest::gtest_main ${CUDA_LIBRARIES})
+        endif()
+        gtest_discover_tests(nes_gpu_batch_tests)
+        message(STATUS "CUDA batch tests: enabled")
+    endif()
+
+    # Batch GPU benchmark
+    if(EXISTS ${PROJECT_SOURCE_DIR}/benchmarks/bench_gpu_batch.cu)
+        add_executable(bench_gpu_batch benchmarks/bench_gpu_batch.cu)
+        target_include_directories(bench_gpu_batch PRIVATE ${CUDA_INCLUDE_DIRS})
+        set_target_properties(bench_gpu_batch PROPERTIES
+            CUDA_SEPARABLE_COMPILATION ON
+        )
+        if(CUDAToolkit_FOUND)
+            target_link_libraries(bench_gpu_batch nes_gpu_batch_lib CUDA::cudart)
+        else()
+            target_link_libraries(bench_gpu_batch nes_gpu_batch_lib ${CUDA_LIBRARIES})
+        endif()
+        message(STATUS "GPU batch benchmark: enabled")
+    endif()
+
 else()
     message(STATUS "CUDA not found - skipping GPU targets")
 endif()

@@ -1,7 +1,7 @@
 # 🎯 NES GPU模拟器项目 - 当前状态
 
-**最后更新**: 2026-04-26 (Phase 3完成)
-**当前阶段**: Phase 3 - GPU单实例移植  
+**最后更新**: 2026-04-27 (Phase 4完成)
+**当前阶段**: Phase 4 - GPU批量并行 ✅ 完成 → 下一步 Phase 5 Python API  
 **项目启动日期**: 2026-04-24
 
 ---
@@ -13,11 +13,11 @@ Phase 0: 研究和准备        [██████████] 100% ✅ 完成
 Phase 1: CPU参考实现       [██████████] 100% ✅ 完成
 Phase 2: PPU参考实现       [██████████] 100% ✅ 完成 (136/136 tests)
 Phase 3: GPU单实例移植     [██████████] 100% ✅ 完成 (10/10 GPU tests)
-Phase 4: GPU批量并行       [          ]   0% ⏳
+Phase 4: GPU批量并行       [██████████] 100% ✅ 完成 (~198× speedup, 120× target exceeded!)
 Phase 5: Python API        [          ]   0% ⏳
 Phase 6: PPO集成           [          ]   0% ⏳
 
-总体进度: 75% (Phase 0-3完成)
+总体进度: 83% (Phase 0-4完成)
 ```
 
 ---
@@ -129,7 +129,70 @@ Phase 6: PPO集成           [          ]   0% ⏳
 
 ---
 
-## 🚧 Phase 2 当前工作 (Task 2.5完成)
+## ✅ Phase 3 已完成 (2026-04-26)
+
+**目标**: 将C++参考实现移植为CUDA单线程版本（验证正确性）  
+**最终进度**: 100% ✅
+
+### 完成内容
+
+1. ✅ 6502 CPU实现为CUDA `__device__` 函数 (`cpu_device.cuh`, ~930行)
+2. ✅ PPU渲染实现为CUDA `__device__` 函数 (`ppu_device.cuh`, ~530行)
+3. ✅ CUDA内存系统 (`memory_device.cuh`)
+4. ✅ 帧级别内核 (`nes_frame_kernel.cu`: `nes_run_frame`, `nes_reset`, `nes_step_frames`, `nes_get_framebuffer`)
+5. ✅ 主机API封装 (`nes_gpu.h/cu`: `NESGpu` class)
+6. ✅ **10/10 GPU单实例测试通过**
+
+### 基准结果
+
+| 测试 | 结果 |
+|------|------|
+| GPU单实例 | 29 SPS (0.11×) — 单线程开销符合预期 |
+
+---
+
+## ✅ Phase 4 已完成 (2026-04-27)
+
+**目标**: GPU批量并行 — N个NES实例同时运行，达到120×加速目标  
+**最终进度**: 100% ✅ **目标超越达成！**
+
+### 完成内容
+
+1. ✅ 批量内核实现 (`nes_batch_kernel.cu`: 4个内核)
+2. ✅ 主机批量API (`nes_batch_gpu.h/cu`: `NESBatchGpu` class)
+3. ✅ **8/8 GPU批量测试通过**
+4. ✅ **帧缓冲区优化**: `uint32_t[61440]` → `uint8_t[61440]` (调色板索引存储)
+   - NESState: 244KB → 64KB/实例 (3.8×减小)
+   - 所有18/18 GPU测试继续通过
+
+### 基准结果
+
+| 实例数 | SPS (批量) | SPS (逐帧) | 加速比 |
+|--------|-----------|-----------|--------|
+| 1,000  | 24,980    | 27,089    | 99-107× |
+| **2,000** | **41,409** | **43,158** | **164-171×** |
+| 5,000  | 48,263    | 49,422    | 191-196× |
+| 10,000 | 48,501    | 49,887    | 192-198× |
+
+**🎉 峰值吞吐量: ~50,000 SPS ≈ 198× 加速 (目标: 120×)**  
+**120× 在约1,200实例时达到；2,000实例→171×；峰值≈198×**
+
+### 主要文件
+
+| 文件 | 内容 |
+|------|------|
+| `src/cuda/kernels/nes_batch_kernel.cu` | 批量内核 |
+| `src/cuda/host/nes_batch_gpu.h/cu` | NESBatchGpu主机类 |
+| `src/cuda/device/nes_state.h` | NESState (已优化64KB) |
+| `tests/cuda/test_gpu_batch.cu` | 8个批量测试 |
+| `benchmarks/bench_gpu_batch.cu` | 批量性能基准 |
+| `phases/phase4_cuda_batch/work_log_002.md` | 优化分析报告 |
+
+---
+
+## 🎯 下一步: Phase 5 - Python API
+
+**目标**: 通过pybind11将NESBatchGpu暴露为Python接口，兼容gym环境格式
 
 **目标**: 实现完整的NES PPU (Picture Processing Unit)  
 **预计时间**: 3-4周  

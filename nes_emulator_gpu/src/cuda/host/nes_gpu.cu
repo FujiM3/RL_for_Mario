@@ -27,6 +27,8 @@ __global__ void nes_step_frames(NESState* state,
                                  const uint8_t* chr_rom, uint32_t chr_size,
                                  int num_frames);
 
+__global__ void nes_get_framebuffer(const NESState* state, uint32_t* output);
+
 // Macro for CUDA error checking
 #define CUDA_CHECK(x) cuda_check(static_cast<int>(x), __FILE__, __LINE__)
 
@@ -172,14 +174,14 @@ void NESGpu::run_frames(int n) {
 // ---------------------------------------------------------------------------
 
 const uint32_t* NESGpu::get_framebuffer() {
-    if (!d_state_) return nullptr;
+    if (!d_state_ || !d_framebuf_) return nullptr;
 
-    // Copy framebuffer from device NESState directly
-    size_t ppu_offset = offsetof(NESState, ppu);
-    size_t fb_offset = ppu_offset + offsetof(NESPPUState, framebuffer);
+    // Launch framebuffer kernel: converts palette indices → RGBA32 on GPU
+    nes_get_framebuffer<<<240, 256>>>(d_state_, d_framebuf_);
+    CUDA_CHECK(cudaGetLastError());
+    CUDA_CHECK(cudaDeviceSynchronize());
 
-    CUDA_CHECK(cudaMemcpy(h_framebuf_,
-                          reinterpret_cast<const uint8_t*>(d_state_) + fb_offset,
+    CUDA_CHECK(cudaMemcpy(h_framebuf_, d_framebuf_,
                           NES_FRAMEBUFFER_SIZE * sizeof(uint32_t),
                           cudaMemcpyDeviceToHost));
     return h_framebuf_;

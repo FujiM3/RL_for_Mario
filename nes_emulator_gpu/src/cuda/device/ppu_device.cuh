@@ -313,6 +313,17 @@ __device__ __forceinline__ void ppu_get_pattern_tile(const NESPPUState* ppu,
 // ---------------------------------------------------------------------------
 // Background: get final pixel color (palette_idx 0-3, pixel 0-3)
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// Background color as palette index (stored in framebuffer for compact storage)
+// ---------------------------------------------------------------------------
+__device__ __forceinline__ uint8_t ppu_get_background_palette_index(const NESPPUState* ppu,
+                                                                      uint8_t palette_idx,
+                                                                      uint8_t pixel) {
+    if (pixel == 0) return ppu->palette[0];
+    return ppu->palette[palette_idx * 4 + pixel];
+}
+
+// Legacy full-color lookup (used in nes_get_framebuffer output only)
 __device__ __forceinline__ uint32_t ppu_get_background_color(const NESPPUState* ppu,
                                                                uint8_t palette_idx,
                                                                uint8_t pixel) {
@@ -329,8 +340,8 @@ __device__ void ppu_render_background_tile(NESPPUState* ppu,
     int base_x = tile_x * 8;
 
     if (!(ppu->mask & 0x08u)) {
-        // Background disabled: fill with backdrop
-        uint32_t backdrop = ppu_get_palette_color(ppu->palette[0]);
+        // Background disabled: fill with backdrop palette index
+        uint8_t backdrop = ppu->palette[0];
         for (int px = 0; px < 8; px++) {
             ppu->framebuffer[y * 256 + base_x + px] = backdrop;
         }
@@ -349,7 +360,8 @@ __device__ void ppu_render_background_tile(NESPPUState* ppu,
     for (int px = 0; px < 8; px++) {
         uint8_t shift = (uint8_t)(7 - px);
         uint8_t pixel = (uint8_t)(((hi >> shift) & 1u) << 1 | ((lo >> shift) & 1u));
-        ppu->framebuffer[y * 256 + base_x + px] = ppu_get_background_color(ppu, palette_idx, pixel);
+        ppu->framebuffer[y * 256 + base_x + px] =
+            ppu_get_background_palette_index(ppu, palette_idx, pixel);
     }
 }
 
@@ -432,16 +444,17 @@ __device__ void ppu_render_sprite_pixel(NESPPUState* ppu, int x, int y) {
         if (pixel == 0) continue;
 
         uint8_t pal_idx = spr->attr & 0x03u;
-        uint32_t color = ppu_get_sprite_color(ppu, pal_idx, pixel);
+        // Get sprite palette index (stored compactly in framebuffer)
+        uint8_t offset = (uint8_t)(0x10u + pal_idx * 4 + pixel);
+        uint8_t color_index = ppu_read_palette_fast(ppu, offset);
 
         bool behind_bg = (spr->attr & 0x20u) != 0;
         if (behind_bg) {
-            uint32_t bg_color = ppu->framebuffer[y * 256 + x];
-            uint32_t backdrop = ppu_get_palette_color(ppu->palette[0]);
-            if (bg_color != backdrop) continue;
+            uint8_t bg_idx = ppu->framebuffer[y * 256 + x];
+            if (bg_idx != ppu->palette[0]) continue;  // Behind opaque background
         }
 
-        ppu->framebuffer[y * 256 + x] = color;
+        ppu->framebuffer[y * 256 + x] = color_index;
         return;  // First non-transparent sprite wins
     }
 }

@@ -26,6 +26,7 @@
 __global__ void nes_run_frame(NESState*, const uint8_t*, uint32_t, const uint8_t*, uint32_t);
 __global__ void nes_reset(NESState*, const uint8_t*, uint32_t, const uint8_t*, uint32_t);
 __global__ void nes_step_frames(NESState*, const uint8_t*, uint32_t, const uint8_t*, uint32_t, int);
+__global__ void nes_get_framebuffer(const NESState* state, uint32_t* output);
 
 // ---------------------------------------------------------------------------
 // Helper: build a minimal NROM-128 (16KB PRG, 8KB CHR) test ROM
@@ -217,17 +218,28 @@ TEST_F(GPUSingleTest, VBlankOccursDuringFrame) {
 
 TEST_F(GPUSingleTest, FramebufferNotAllBlack) {
     // Run a frame - with rendering enabled, at least some pixels should be non-zero.
-    // Note: our test ROM enables background ($2001 = $1E) so we expect output.
+    // framebuffer now stores uint8_t palette indices; use nes_get_framebuffer to get RGBA.
     run_frame();
-    sync_state();
+
+    uint32_t* d_rgba = nullptr;
+    ASSERT_EQ(cudaMalloc(&d_rgba, NES_FRAMEBUFFER_SIZE * sizeof(uint32_t)), cudaSuccess);
+    nes_get_framebuffer<<<240, 256>>>(d_state, d_rgba);
+    ASSERT_EQ(cudaGetLastError(), cudaSuccess);
+    ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+
+    std::vector<uint32_t> h_rgba(NES_FRAMEBUFFER_SIZE);
+    ASSERT_EQ(cudaMemcpy(h_rgba.data(), d_rgba,
+                         NES_FRAMEBUFFER_SIZE * sizeof(uint32_t),
+                         cudaMemcpyDeviceToHost), cudaSuccess);
+    cudaFree(d_rgba);
 
     int non_zero = 0;
     for (int i = 0; i < NES_FRAMEBUFFER_SIZE; i++) {
-        if (h_state.ppu.framebuffer[i] != 0) non_zero++;
+        if (h_rgba[i] != 0) non_zero++;
     }
 
-    // With default palette (index 0 = 0xFF666666 grey), backdrop is non-zero
-    EXPECT_GT(non_zero, 0) << "Framebuffer should have some non-zero pixels";
+    // NES_PALETTE_CONST[0] maps palette index 0 → non-zero RGBA (e.g. gray)
+    EXPECT_GT(non_zero, 0) << "Framebuffer RGBA should have some non-zero pixels";
 }
 
 TEST_F(GPUSingleTest, MultipleFramesAdvanceState) {
