@@ -15,7 +15,8 @@ Interface is compatible with MarioVecEnv:
 Key differences from MarioVecEnv:
   - All NES simulation runs on GPU (one CUDA thread per instance)
   - No subprocess overhead — observations fetched with cudaMemcpy
-  - Frame stack of 4 implemented in host numpy (4 × N × 84 × 84 uint8)
+  - Frame stack of 4 implemented on GPU as torch uint8 tensor (4 × N × 84 × 84)
+  - Observations returned as (N, 4, 84, 84) uint8 CUDA tensor — no H2D needed in training
   - Default frame skip: 4 (matches nes_py wrappers)
   - Reward = x-position delta / 40; death = -15; flag = +15
   - Done on: lives < initial_lives OR stage_clear_flag set
@@ -44,6 +45,7 @@ from pathlib import Path
 from typing import Optional, Tuple, List, Dict, Any
 
 import numpy as np
+import torch
 
 # GPU emulator Python extension
 # The .so is built in nes_emulator_gpu/src/python/ — add to sys.path
@@ -203,14 +205,13 @@ class GpuMarioVecEnv:
         self._batch.set_rendering_enabled(render)
         # Note: reset_all is called inside reset() along with the title skip
 
-        # Frame stack circular buffer: (frame_stack, N, H, W) uint8
-        # _frame_idx = write position; oldest = _frame_idx, newest = _frame_idx-1
-        self._frame_buf = np.zeros(
-            (frame_stack, num_envs, 84, 84), dtype=np.uint8
+        # Frame stack circular buffer on GPU: (frame_stack, N, H, W) uint8 CUDA tensor.
+        # Keeping the buffer on GPU eliminates the CPU-side _stacked_obs copy (saves ~33ms/step).
+        self._device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
+        self._frame_buf_gpu = torch.zeros(
+            (frame_stack, num_envs, 84, 84), dtype=torch.uint8, device=self._device
         )
         self._frame_idx: int = 0  # circular write position
-        # Pre-allocated reorder buffer to avoid double copy in _stacked_obs
-        self._reorder_buf = np.empty_like(self._frame_buf)
 
         # Per-instance tracking
         self._prev_x      = np.zeros(num_envs, dtype=np.int32)
@@ -246,24 +247,24 @@ class GpuMarioVecEnv:
     def _extract_stage_clear(self, ram: np.ndarray) -> np.ndarray:
         return (ram[:, _RAM_STAGE_CLEAR] == 0x80)
 
-    def _push_frame(self, obs_frame: np.ndarray) -> None:
-        """Push new frame into circular buffer (in-place, no np.roll copy)."""
-        self._frame_buf[self._frame_idx] = obs_frame  # (N, 84, 84)
+    def _push_frame_gpu(self, obs_frame: np.ndarray) -> None:
+        """Push new frame (CPU numpy) into GPU circular buffer (H2D 14MB per step)."""
+        self._frame_buf_gpu[self._frame_idx].copy_(
+            torch.from_numpy(obs_frame)
+        )
         self._frame_idx = (self._frame_idx + 1) % self.frame_stack
 
-    def _stacked_obs(self) -> np.ndarray:
-        """Return (N, frame_stack, 84, 84) uint8 — current frame stack.
+    def _stacked_obs_gpu(self) -> torch.Tensor:
+        """Return (N, frame_stack, H, W) uint8 CUDA tensor — current frame stack.
 
-        Reads frames in chronological order (oldest→newest) from the circular
-        buffer and returns a contiguous (N, frame_stack, H, W) array.
-        Uses explicit slice copies into _reorder_buf to avoid the double-copy
-        overhead of fancy indexing (frame_buf[order] allocates + transposes twice).
+        Reads frames in chronological order (oldest→newest) from the GPU circular
+        buffer and returns a new (N, frame_stack, H, W) CUDA tensor via torch.stack.
+        GPU-side stack is ~1ms vs the old CPU reorder+transpose (~33ms).
         """
         n = self.frame_stack
         idx = self._frame_idx  # oldest frame is at write position
-        for i in range(n):
-            self._reorder_buf[i] = self._frame_buf[(idx + i) % n]
-        return self._reorder_buf.transpose(1, 0, 2, 3).copy()
+        frames = [self._frame_buf_gpu[(idx + i) % n] for i in range(n)]
+        return torch.stack(frames, dim=1)  # (N, frame_stack, H, W)
 
     # ── Public interface ──────────────────────────────────────────────────────
 
@@ -299,15 +300,16 @@ class GpuMarioVecEnv:
 
         # Fetch observation + RAM after skip
         obs_frame, ram = self._get_obs_and_ram()
-        self._frame_buf[:] = obs_frame[np.newaxis]  # broadcast to all stack slots
+        obs_t = torch.from_numpy(obs_frame).to(self._device)
+        self._frame_buf_gpu[:] = obs_t  # broadcast (N,84,84) → (frame_stack,N,84,84)
         self._prev_x      = self._extract_x_pos(ram)
         self._init_lives  = self._extract_lives(ram)
 
-        return self._stacked_obs()
+        return self._stacked_obs_gpu()
 
     def step(
         self, actions: np.ndarray
-    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, List[Dict[str, Any]]]:
+    ) -> Tuple[torch.Tensor, np.ndarray, np.ndarray, List[Dict[str, Any]]]:
         """
         Step all instances with given actions.
 
@@ -318,9 +320,9 @@ class GpuMarioVecEnv:
             actions: (N,) int array of SIMPLE_MOVEMENT indices (0–6)
 
         Returns:
-            obs:     (N, 4, 84, 84) uint8 — stacked grayscale observations
-            rewards: (N,) float32
-            dones:   (N,) bool
+            obs:     (N, 4, 84, 84) uint8 CUDA tensor — stacked grayscale observations
+            rewards: (N,) float32 numpy array
+            dones:   (N,) bool numpy array
             infos:   list of N dicts
         """
         actions    = np.asarray(actions, dtype=np.int32)
@@ -350,7 +352,7 @@ class GpuMarioVecEnv:
 
         # Get observation + RAM
         obs_frame, ram = self._get_obs_and_ram()
-        self._push_frame(obs_frame)
+        self._push_frame_gpu(obs_frame)
 
         cur_x       = self._extract_x_pos(ram)
         cur_lives   = self._extract_lives(ram)
@@ -397,7 +399,7 @@ class GpuMarioVecEnv:
         active = ~booting & ~dones
         self._prev_x[active] = cur_x[active]
 
-        return self._stacked_obs(), rewards.astype(np.float32), dones, infos
+        return self._stacked_obs_gpu(), rewards.astype(np.float32), dones, infos
 
     def close(self) -> None:
         """Release GPU resources."""
@@ -439,14 +441,14 @@ class GpuMarioVecEnvStats:
         self._ep_rewards = np.zeros(self.num_envs, dtype=np.float64)
         self._ep_lengths = np.zeros(self.num_envs, dtype=np.int32)
 
-    def reset(self) -> np.ndarray:
+    def reset(self) -> torch.Tensor:
         self._ep_rewards[:] = 0.0
         self._ep_lengths[:] = 0
         return self._env.reset()
 
     def step(
         self, actions: np.ndarray
-    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, List[Dict[str, Any]]]:
+    ) -> Tuple[torch.Tensor, np.ndarray, np.ndarray, List[Dict[str, Any]]]:
         obs, rewards, dones, infos = self._env.step(actions)
 
         self._ep_rewards += rewards

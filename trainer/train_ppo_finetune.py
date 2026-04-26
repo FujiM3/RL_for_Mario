@@ -352,12 +352,27 @@ def train(args):
         )
 
     # ── 初始 obs ──────────────────────────────────────────────────────────────
-    obs = venv.reset()           # (N, 4, 84, 84) uint8
+    obs = venv.reset()           # (N, 4, 84, 84) uint8 — CUDA tensor (GPU mode) or numpy (CPU mode)
+    # Detect if the env returns GPU tensors (GpuMarioVecEnv with GPU frame buffer).
+    # When True, obs is already on the training device — skip H2D for inference.
+    _obs_on_gpu = isinstance(obs, torch.Tensor) and obs.is_cuda
+
+    # Pre-allocate a pinned CPU tensor for fast D2H when obs is on GPU.
+    # obs.cpu().numpy() each step allocates a new 57MB buffer (38ms).
+    # pinned.copy_(obs) into a pre-allocated pinned buffer takes ~5ms (8× faster).
+    if _obs_on_gpu:
+        _obs_pinned = torch.empty(obs.shape, dtype=obs.dtype, pin_memory=True)
+    else:
+        _obs_pinned = None
 
     # ── 训练循环 ──────────────────────────────────────────────────────────────
     total_rollouts = cfg["total_timesteps"] // (cfg["num_envs"] * cfg["rollout_steps"])
     print(f"\n[PPO] Training for {cfg['total_timesteps']:,} steps")
-    print(f"[PPO] = {total_rollouts} rollouts × {cfg['num_envs']} envs × {cfg['rollout_steps']} steps\n")
+    print(f"[PPO] = {total_rollouts} rollouts × {cfg['num_envs']} envs × {cfg['rollout_steps']} steps")
+    if _obs_on_gpu:
+        print(f"[PPO] GPU obs: enabled — H2D skipped for inference, pinned D2H for buffer (~5ms vs ~39ms)\n")
+    else:
+        print()
 
     # 追踪 episode 统计
     episode_rewards = []
@@ -380,7 +395,9 @@ def train(args):
 
         for step in range(cfg["rollout_steps"]):
             with torch.no_grad():
-                obs_tensor = torch.from_numpy(obs).to(device)
+                # GPU mode: obs is already a CUDA tensor — no H2D needed.
+                # CPU mode: convert numpy to tensor and move to device.
+                obs_tensor = obs if _obs_on_gpu else torch.from_numpy(obs).to(device)
                 action, log_prob, _, value = model.get_action_and_value(obs_tensor)
 
                 action_np   = action.cpu().numpy()
@@ -394,7 +411,9 @@ def train(args):
             rewards = rewards / 10.0
 
             buffer.add(
-                obs=obs,
+                # GPU mode: D2H obs into pre-allocated pinned CPU buffer (~5ms) then numpy view.
+                # CPU mode: use numpy obs directly.
+                obs=(_obs_pinned.copy_(obs).numpy() if _obs_on_gpu else obs),
                 actions=action_np,
                 rewards=rewards,
                 dones=dones,
@@ -415,9 +434,8 @@ def train(args):
 
         # ── Bootstrap last value ──────────────────────────────────────────────
         with torch.no_grad():
-            last_value = model.get_value(
-                torch.from_numpy(obs).to(device)
-            ).cpu().numpy()
+            last_obs_t = obs if _obs_on_gpu else torch.from_numpy(obs).to(device)
+            last_value = model.get_value(last_obs_t).cpu().numpy()
 
         buffer.compute_returns_and_advantages(last_values=last_value)
 

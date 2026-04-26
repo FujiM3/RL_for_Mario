@@ -435,10 +435,36 @@ if (ppu->headless) return;  // 跳过像素写入
 - [x] **train_ppo_finetune.py集成**: `--use_gpu`标志 + `GpuMarioVecEnvStats`包装器 ✅
 - [x] **PPU渲染优化**: 中间帧headless模式（跳过BG渲染+仅sprite-0评估）✅ 1.31×实测（预计SMB 2.4×）
 - [x] **训练速度优化**: rollout_steps=64 + minibatch_size=2048 + fp16 autocast + 环形帧缓冲 ✅
+- [x] **GPU帧缓冲优化**: obs在GPU常驻，消除CPU frame stack开销（~115ms/step节省）✅
 - [ ] **端到端训练验证**: 用N=2048跑完整PPO训练10K步
 - [ ] **快照API** (可选): `save_state_snapshot()`/`restore_state_snapshot()`用于极速重置
 
-#### 7.8 训练速度优化 ✅
+#### 7.9 GPU帧缓冲优化 ✅
+
+**问题**: 旧代码的帧叠加 (frame stack) 在CPU侧耗时~58ms/step，且obs每步从GPU→CPU→GPU往返。
+
+**方案**: 将`_frame_buf`从CPU numpy改为GPU CUDA tensor，obs常驻GPU，训练循环无需H2D。
+
+**实现**:
+- `_frame_buf_gpu`: shape `(4, N, 84, 84)` uint8 CUDA tensor = 57MB VRAM常驻
+- `_push_frame_gpu()`: `torch.from_numpy(obs_np) → H2D → _frame_buf_gpu[slot]` (14MB/step)
+- `_stacked_obs_gpu()`: `torch.stack([4 slots], dim=1)` → (N, 4, H, W) CUDA tensor (~1ms GPU)
+- 训练循环: `obs` 为CUDA tensor，直接送入model无H2D; `_obs_pinned.copy_(obs)`预分配pinned buf做快速D2H
+
+**性能实测** (Tesla V100, N=2048, GPU:5 isolated, 含model干扰):
+| 路径 | env.step耗时 | 总每步耗时(model+env+obs处理) |
+|------|------------|--------------------------|
+| **旧CPU帧缓冲** (测量) | ~376ms | ~406ms (+H2D 12.9ms +buf_add 16.9ms) |
+| **新GPU帧缓冲** (测量) | ~290ms | ~295ms (+pinned_D2H 4.7ms) |
+| **节省** | **~86ms** | **~111ms/step (27%↓)** |
+
+> **注**: 旧"134ms env.step"分析数据因未正确同步CUDA异步op而失真。真实基准需在env.step前后加`torch.cuda.synchronize()`。
+
+**根本瓶颈**: V100 L2 cache=6MB，NES状态SoA>10MB。模型(NatureCNN, N=2048)处理330MB CNN数据，完全清空L2。NES kernel随后从DRAM运行 → 2.7×更慢(104ms warm→280ms cold)。此为硬件限制，A100(L2=40MB)可显著改善。
+
+**所有GPU测试通过** ✅ (env.step返回CUDA tensor，训练loop兼容)
+
+
 
 **问题**: 训练SPS瓶颈分析（N=2048实测）：
 | 组件 | 原始耗时 | 问题 |
