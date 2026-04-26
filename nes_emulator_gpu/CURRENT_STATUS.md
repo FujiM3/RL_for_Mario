@@ -1,6 +1,6 @@
 # 🎯 NES GPU模拟器项目 - 当前状态
 
-**最后更新**: 2026-05-xx (Phase 7完成 - PPU Headless优化 + train_ppo_finetune.py集成)
+**最后更新**: 2026-05-xx (Phase 7完成 - 训练速度优化: rollout_steps=64 + fp16 + 环形帧缓冲)
 **当前阶段**: Phase 7 - PPO集成 ✅ 基本完成 → 下一步: 端到端训练验证
 **项目启动日期**: 2026-04-24
 
@@ -434,8 +434,38 @@ if (ppu->headless) return;  // 跳过像素写入
 
 - [x] **train_ppo_finetune.py集成**: `--use_gpu`标志 + `GpuMarioVecEnvStats`包装器 ✅
 - [x] **PPU渲染优化**: 中间帧headless模式（跳过BG渲染+仅sprite-0评估）✅ 1.31×实测（预计SMB 2.4×）
+- [x] **训练速度优化**: rollout_steps=64 + minibatch_size=2048 + fp16 autocast + 环形帧缓冲 ✅
 - [ ] **端到端训练验证**: 用N=2048跑完整PPO训练10K步
 - [ ] **快照API** (可选): `save_state_snapshot()`/`restore_state_snapshot()`用于极速重置
+
+#### 7.8 训练速度优化 ✅
+
+**问题**: 训练SPS瓶颈分析（N=2048实测）：
+| 组件 | 原始耗时 | 问题 |
+|------|---------|------|
+| env.step() | 162ms/step | GPU kernel 103ms + frame stack 58ms |
+| 单轮rollout (T=256) | 41.5s | 太长，buffer太大 |
+| PPO update (T=256, MB=512, fp32) | ~78.8s | obs buffer 14.78GB → cache miss |
+| frame stack np.roll | 38ms | 每步复制57MB |
+
+**三项优化**:
+
+1. **rollout_steps=64** (↓from 256): obs buffer 3.7GB vs 14.78GB → PPO update 4× 更快
+2. **minibatch_size=2048** (↑from 512): 减少minibatch数量4× → 进一步加速
+3. **fp16 autocast** (GradScaler): V100 Tensor Cores利用 → 每epoch ~1.25×加速
+4. **环形帧缓冲**: 消除np.roll (38ms → 2.6ms)，_push_frame 15× 加速
+
+**实测结果**:
+| 指标 | 优化前 | 优化后 | 改善 |
+|------|-------|-------|------|
+| _push_frame | ~38ms | 2.6ms | **15×** |
+| env.step() | 162ms | 149ms | **1.09×** |
+| PPO update (4ep) | ~78.8s | 14.1s | **5.6×** |
+| 每次迭代总时长 | ~120s (131K steps) | ~23.6s (131K steps) | **5.1×** |
+| 实测SPS | ~2,600 | ~3,041 | **1.17×** |
+| 稳态投影SPS | ~4,359 | ~5,549 | **1.27×** |
+
+> **注**: SPS实测因boot时间(~10s)分摊而较稳态投影偏低。稳态投影基于每轮rollout 9.5s + PPO update 14.1s = 23.6s。
 
 ---
 

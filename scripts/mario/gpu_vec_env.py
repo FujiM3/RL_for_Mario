@@ -203,10 +203,14 @@ class GpuMarioVecEnv:
         self._batch.set_rendering_enabled(render)
         # Note: reset_all is called inside reset() along with the title skip
 
-        # Frame stack buffer: (frame_stack, N, 84, 84) uint8
+        # Frame stack circular buffer: (frame_stack, N, H, W) uint8
+        # _frame_idx = write position; oldest = _frame_idx, newest = _frame_idx-1
         self._frame_buf = np.zeros(
             (frame_stack, num_envs, 84, 84), dtype=np.uint8
         )
+        self._frame_idx: int = 0  # circular write position
+        # Pre-allocated reorder buffer to avoid double copy in _stacked_obs
+        self._reorder_buf = np.empty_like(self._frame_buf)
 
         # Per-instance tracking
         self._prev_x      = np.zeros(num_envs, dtype=np.int32)
@@ -243,15 +247,23 @@ class GpuMarioVecEnv:
         return (ram[:, _RAM_STAGE_CLEAR] == 0x80)
 
     def _push_frame(self, obs_frame: np.ndarray) -> None:
-        """Push new frame into stack (oldest frame dropped)."""
-        # frame_buf[0] = oldest, frame_buf[-1] = newest
-        self._frame_buf = np.roll(self._frame_buf, shift=-1, axis=0)
-        self._frame_buf[-1] = obs_frame  # (N, 84, 84)
+        """Push new frame into circular buffer (in-place, no np.roll copy)."""
+        self._frame_buf[self._frame_idx] = obs_frame  # (N, 84, 84)
+        self._frame_idx = (self._frame_idx + 1) % self.frame_stack
 
     def _stacked_obs(self) -> np.ndarray:
-        """Return (N, frame_stack, 84, 84) uint8 — current frame stack."""
-        # frame_buf is (frame_stack, N, H, W); transpose to (N, frame_stack, H, W)
-        return self._frame_buf.transpose(1, 0, 2, 3).copy()
+        """Return (N, frame_stack, 84, 84) uint8 — current frame stack.
+
+        Reads frames in chronological order (oldest→newest) from the circular
+        buffer and returns a contiguous (N, frame_stack, H, W) array.
+        Uses explicit slice copies into _reorder_buf to avoid the double-copy
+        overhead of fancy indexing (frame_buf[order] allocates + transposes twice).
+        """
+        n = self.frame_stack
+        idx = self._frame_idx  # oldest frame is at write position
+        for i in range(n):
+            self._reorder_buf[i] = self._frame_buf[(idx + i) % n]
+        return self._reorder_buf.transpose(1, 0, 2, 3).copy()
 
     # ── Public interface ──────────────────────────────────────────────────────
 
@@ -268,6 +280,7 @@ class GpuMarioVecEnv:
         """
         self._batch.reset_all(self._mirroring)
         self._boot_frames[:] = 0
+        self._frame_idx = 0
 
         N = self.num_envs
         start_arr = np.full(N, _START_BTN, dtype=np.uint8)

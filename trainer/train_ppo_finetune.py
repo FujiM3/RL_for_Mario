@@ -50,8 +50,10 @@ def get_default_config(use_gpu: bool = False) -> dict:
     cfg = {
         # 环境
         "num_envs":            2048 if use_gpu else 16,
-        "rollout_steps":       2048,
-        "total_timesteps":     10_000_000,   # 50M → 10M（DT预训练已收敛，不需要从零探索）
+        # GPU模式: rollout_steps=64 → 131K步/rollout (3.7GB obs buffer vs 14.8GB for 256)
+        # CPU模式: rollout_steps=2048 → 32K步/rollout
+        "rollout_steps":       64 if use_gpu else 2048,
+        "total_timesteps":     10_000_000,
 
         # 模型
         "hidden_size":         512,
@@ -68,7 +70,7 @@ def get_default_config(use_gpu: bool = False) -> dict:
         "ent_coef":            0.1,    # 0.05 → 0.1，进一步抑制策略过早收敛
         "vf_coef":             0.5,
         "update_epochs":       4,
-        "minibatch_size":      512,
+        "minibatch_size":      2048 if use_gpu else 512,  # GPU: larger batch → better Tensor Core util
         "gamma":               0.99,
         "gae_lambda":          0.95,
 
@@ -88,6 +90,7 @@ def get_default_config(use_gpu: bool = False) -> dict:
 
         # GPU 模式标志
         "use_gpu": use_gpu,
+        "use_fp16": use_gpu,  # fp16 autocast for V100 Tensor Core acceleration
     }
     return cfg
 
@@ -100,9 +103,13 @@ def ppo_update(
     buffer: RolloutBuffer,
     cfg: dict,
     device: str,
+    scaler: Optional[torch.amp.GradScaler] = None,
 ) -> dict:
     """
     执行一轮 PPO update（多个 epoch × 多个 minibatch）。
+
+    Args:
+        scaler: GradScaler for fp16 mixed-precision training (None = fp32)
 
     Returns:
         loss_info: dict，包含各 loss 分量的均值
@@ -110,55 +117,70 @@ def ppo_update(
     pg_losses, value_losses, entropy_losses, total_losses = [], [], [], []
     approx_kls, clip_fracs = [], []
 
+    use_fp16 = scaler is not None
+    autocast_ctx = (
+        torch.amp.autocast(device_type="cuda")
+        if use_fp16
+        else torch.amp.autocast(device_type="cuda", enabled=False)
+    )
+
     for _ in range(cfg["update_epochs"]):
         for batch in buffer.get_minibatches(
             minibatch_size=cfg["minibatch_size"],
             normalize_advantages=True,
         ):
             # ── 用新策略重新评估 ────────────────────────────────────────
-            _, new_log_prob, entropy, new_value = model.get_action_and_value(
-                batch.obs, action=batch.actions
-            )
+            with autocast_ctx:
+                _, new_log_prob, entropy, new_value = model.get_action_and_value(
+                    batch.obs, action=batch.actions
+                )
 
-            # ── Policy Loss (clipped surrogate) ─────────────────────────
-            log_ratio = new_log_prob - batch.log_probs
-            ratio = log_ratio.exp()
+                # ── Policy Loss (clipped surrogate) ─────────────────────────
+                log_ratio = new_log_prob - batch.log_probs
+                ratio = log_ratio.exp()
 
-            # 检测近似 KL（用于监控，不做 early stopping）
+                pg_loss1 = -batch.advantages * ratio
+                pg_loss2 = -batch.advantages * torch.clamp(
+                    ratio, 1.0 - cfg["clip_coef"], 1.0 + cfg["clip_coef"]
+                )
+                pg_loss = torch.max(pg_loss1, pg_loss2).mean()
+
+                # ── Value Loss (clipped) ─────────────────────────────────────
+                value_pred_clipped = batch.values + torch.clamp(
+                    new_value - batch.values,
+                    -cfg["clip_coef"],
+                    cfg["clip_coef"],
+                )
+                vf_loss1 = F.mse_loss(new_value, batch.returns)
+                vf_loss2 = F.mse_loss(value_pred_clipped, batch.returns)
+                vf_loss = 0.5 * torch.max(vf_loss1, vf_loss2)
+
+                # ── Entropy Bonus ────────────────────────────────────────────
+                entropy_loss = -entropy.mean()
+
+                # ── Total Loss ───────────────────────────────────────────────
+                loss = (
+                    pg_loss
+                    + cfg["vf_coef"] * vf_loss
+                    + cfg["ent_coef"] * entropy_loss
+                )
+
+            # 检测近似 KL（fp32精度，不受autocast影响）
             with torch.no_grad():
-                approx_kl = ((ratio - 1) - log_ratio).mean()
-                clip_frac = ((ratio - 1.0).abs() > cfg["clip_coef"]).float().mean()
-
-            pg_loss1 = -batch.advantages * ratio
-            pg_loss2 = -batch.advantages * torch.clamp(
-                ratio, 1.0 - cfg["clip_coef"], 1.0 + cfg["clip_coef"]
-            )
-            pg_loss = torch.max(pg_loss1, pg_loss2).mean()
-
-            # ── Value Loss (clipped) ─────────────────────────────────────
-            value_pred_clipped = batch.values + torch.clamp(
-                new_value - batch.values,
-                -cfg["clip_coef"],
-                cfg["clip_coef"],
-            )
-            vf_loss1 = F.mse_loss(new_value, batch.returns)
-            vf_loss2 = F.mse_loss(value_pred_clipped, batch.returns)
-            vf_loss = 0.5 * torch.max(vf_loss1, vf_loss2)
-
-            # ── Entropy Bonus ────────────────────────────────────────────
-            entropy_loss = -entropy.mean()
-
-            # ── Total Loss ───────────────────────────────────────────────
-            loss = (
-                pg_loss
-                + cfg["vf_coef"] * vf_loss
-                + cfg["ent_coef"] * entropy_loss
-            )
+                approx_kl = ((ratio.float() - 1) - log_ratio.float()).mean()
+                clip_frac = ((ratio.float() - 1.0).abs() > cfg["clip_coef"]).float().mean()
 
             optimizer.zero_grad()
-            loss.backward()
-            nn.utils.clip_grad_norm_(model.parameters(), cfg["max_grad_norm"])
-            optimizer.step()
+            if use_fp16:
+                scaler.scale(loss).backward()
+                scaler.unscale_(optimizer)
+                nn.utils.clip_grad_norm_(model.parameters(), cfg["max_grad_norm"])
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                loss.backward()
+                nn.utils.clip_grad_norm_(model.parameters(), cfg["max_grad_norm"])
+                optimizer.step()
 
             # 记录
             pg_losses.append(pg_loss.item())
@@ -171,12 +193,11 @@ def ppo_update(
     return {
         "loss/policy":       np.mean(pg_losses),
         "loss/value":        np.mean(value_losses),
-        "loss/entropy":      -np.mean(entropy_losses),   # 正值更好理解
+        "loss/entropy":      -np.mean(entropy_losses),
         "loss/total":        np.mean(total_losses),
         "debug/approx_kl":   np.mean(approx_kls),
         "debug/clip_frac":   np.mean(clip_fracs),
     }
-
 
 # ── Checkpoint ────────────────────────────────────────────────────────────────
 
@@ -315,6 +336,12 @@ def train(args):
         device=device,
     )
 
+    # ── fp16 GradScaler (GPU mode only) ──────────────────────────────────────
+    scaler: Optional[torch.amp.GradScaler] = None
+    if cfg.get("use_fp16") and device == "cuda":
+        scaler = torch.amp.GradScaler("cuda")
+        print(f"[PPO] Mixed-precision fp16 training enabled (GradScaler)")
+
     # ── Resume ───────────────────────────────────────────────────────────────
     global_step = 0
     rollout_count = 0
@@ -396,7 +423,7 @@ def train(args):
 
         # ── PPO Update ────────────────────────────────────────────────────────
         model.train()
-        loss_info = ppo_update(model, optimizer, buffer, cfg, device)
+        loss_info = ppo_update(model, optimizer, buffer, cfg, device, scaler=scaler)
 
         # ── 课程调度 (CPU 模式；GPU 模式固定 World 1-1，仅统计 clear rate) ─────
         phase_advanced = curriculum.try_advance() if not cfg["use_gpu"] else False
