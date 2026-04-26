@@ -119,6 +119,7 @@ struct NESPPUState {
     // ---- Control flags ----
     uint8_t frame_ready;  // Set when entering scanline 261 (pre-render)
     uint8_t nmi_flag;     // Set at VBlank start if NMI enabled in ctrl
+    uint8_t headless;     // Transient: 1 = skip BG rendering + sprite0-only eval (intermediate frames)
 };
 
 // ---------------------------------------------------------------------------
@@ -142,6 +143,12 @@ struct NESCPUState {
     // ---- Interrupt flags ----
     uint8_t  nmi_pending;
     uint8_t  irq_pending;
+
+    // ---- Joypad 1 ----
+    // Bit layout: A=0, B=1, Sel=2, Start=3, Up=4, Down=5, Left=6, Right=7
+    uint8_t  joypad1;         // Current button bitmask (set by host before each frame)
+    uint8_t  joypad_shift;    // Serial read position (0-7 = buttons, 8+ = open bus)
+    uint8_t  joypad_strobe;   // Strobe/latch state (1=latched, reads always return A)
 };
 
 // ---------------------------------------------------------------------------

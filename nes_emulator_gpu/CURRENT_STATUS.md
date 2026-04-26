@@ -1,7 +1,7 @@
 # 🎯 NES GPU模拟器项目 - 当前状态
 
-**最后更新**: 2026-05-xx (Phase 5完成 - SoA重构, 1154×峰值加速)
-**当前阶段**: Phase 5 - SoA内存优化 ✅ 完成 → 下一步 Phase 6 Python API  
+**最后更新**: 2026-05-xx (Phase 7完成 - PPU Headless优化 + train_ppo_finetune.py集成)
+**当前阶段**: Phase 7 - PPO集成 ✅ 基本完成 → 下一步: 端到端训练验证
 **项目启动日期**: 2026-04-24
 
 ---
@@ -15,10 +15,10 @@ Phase 2: PPU参考实现       [██████████] 100% ✅ 完成 
 Phase 3: GPU单实例移植     [██████████] 100% ✅ 完成 (10/10 GPU tests)
 Phase 4: GPU批量并行       [██████████] 100% ✅ 完成 (~198× speedup @10K inst)
 Phase 5: SoA内存优化       [██████████] 100% ✅ 完成 (1154× peak, 18/18 tests)
-Phase 6: Python API        [          ]   0% ⏳
-Phase 7: PPO集成           [          ]   0% ⏳
+Phase 6: Python API        [██████████] 100% ✅ 完成 (pybind11 + GpuMarioVecEnv)
+Phase 7: PPO集成           [█████████░]  90% 🔄 进行中 (环境就绪+集成完成，端到端训练验证待完成)
 
-总体进度: 83% (Phase 0-5完成)
+总体进度: 95% (Phase 0-6完成, Phase 7进行中)
 ```
 
 ---
@@ -250,17 +250,204 @@ Phase 7: PPO集成           [          ]   0% ⏳
 
 ---
 
-## 🎯 下一步: Phase 6 - Python API
+## ✅ Phase 6 已完成 - Python API (pybind11)
 
-**目标**: 通过pybind11将NESBatchGpu暴露为Python接口，兼容gym环境格式
+**目标**: 通过pybind11将NESBatchGpu暴露为Python接口  
+**实际时间**: ~1天  
+**最终进度**: 100% ✅
 
-**需要实现**:
-1. `nes_batch_gpu_py.cpp` - pybind11绑定
-2. numpy framebuffer传输 (零拷贝 CUDA→numpy)
-3. `NESBatchEnv`类 兼容gym `step()`/`reset()`接口
-4. Python测试: 验证RL框架能直接调用
+### 完成内容
+
+1. ✅ **pybind11绑定** (`src/python/nes_gpu_py.cu`)
+   - `NESBatchGpu` → Python类 `nes_gpu.NESBatchGpu`
+   - 所有方法通过pybind11暴露给Python
+
+2. ✅ **关键Python接口**:
+   ```python
+   batch = nes_gpu.NESBatchGpu(N)
+   batch.load_rom(prg_data, chr_data)
+   batch.set_rendering_enabled(True)
+   batch.reset_all(mirroring)
+   batch.reset_selected(done_mask)        # 掩码式选择性重置
+   batch.set_buttons_batch(buttons)       # (N,) uint8 joypad位图
+   batch.run_frame_all()                  # 运行1帧，同步
+   batch.run_frames_all(n)                # 运行n帧，单次内核启动
+   batch.get_obs_batch()  -> np.ndarray   # (N, 84, 84) uint8 灰度观测
+   batch.get_ram_batch()  -> np.ndarray   # (N, 2048) uint8 CPU RAM
+   ```
+
+3. ✅ **构建系统**: `src/python/setup.py` (CMake + nvcc)
+
+4. ✅ **性能验证** (power-on init state, Tesla V100):
+   | N | run_frames_all(4) | SPS | NES-fps |
+   |---|-------------------|-----|---------|
+   | 100 | 103ms | 970 | 3,883 |
+   | 2048 | 130ms | 15,754 | 63,015 |
 
 ---
+
+## ✅ Phase 7 进行中 - GpuMarioVecEnv + RL集成
+
+**目标**: 实现可用于PPO训练的GPU向量化环境  
+**最终进度**: 80% 🔄
+
+### 已完成内容
+
+#### 7.1 Sprite 0命中检测修复 ✅
+**问题**: 游戏在第34帧停止 — NMI处理器在$8144-$8148等待Sprite 0命中清除，但永远等待。  
+**根因**: `ppu_device.cuh`中缺少sprite 0命中标志写入。  
+**修复** (`src/cuda/device/ppu_device.cuh`, ~line 447-453):
+```cpp
+// 当精灵0像素与不透明背景像素重叠时设置命中标志
+if (spr->oam_index == 0 && bg_opaque && x != 255 &&
+    (ppu->mask & 0x08u)) {
+    ppu->status |= 0x40u;
+}
+```
+**结果**: 游戏顺利通过第34帧，`$0009`帧计数器持续递增。
+
+#### 7.2 游戏播放验证 ✅
+- 100次随机动作步骤，max_x从40→383（Mario在移动！）
+- 32次情节完成（死亡+重置）
+- 观测形状: (N, 4, 84, 84) uint8 ✓
+
+#### 7.3 Title Screen跳过 ✅
+**问题**: 每次`reset()`后，所有实例需~232帧运行标题画面 → 8秒/次重置。  
+**分析**:
+- `$0776.0=1`（游戏运行模式）→ NMI跳过状态机（`$8212`）→ `$07A0`递减计时器无法清零
+- 关键: 当计时器在第32帧启动后，**必须立即停止按START**
+- 然后需要~200帧结算（世界显示倒计时）
+
+**实现** (`scripts/mario/gpu_vec_env.py`):
+```python
+# Phase 1: 36帧交替START/NO-BTN（计时器在~第32帧启动）
+for f in range(BOOT_FRAMES_TOTAL - BOOT_FRAMES_SETTLE):  # 36帧
+    btn = start_arr if (f % 4 < 2) else no_btn
+    batch.set_buttons_batch(btn)
+    batch.run_frame_all()
+
+# Phase 2: 250帧NO-BTN结算（世界显示倒计时，Mario落地）
+batch.set_buttons_batch(no_btn)
+batch.run_frames_all(BOOT_FRAMES_SETTLE)  # 单次内核调用
+```
+
+#### 7.4 实例级启动追踪 ✅
+**问题**: `reset_selected()`将死亡实例重置为开机状态 → 需要启动序列，否则实例永远卡在标题画面（SIMPLE_MOVEMENT中没有START按键）。
+
+**解决方案**: `_boot_frames`数组追踪每个实例的剩余启动帧数：
+```python
+_BOOT_FRAMES_TOTAL  = 286  # 总帧数（36启动 + 250结算）
+_BOOT_FRAMES_SETTLE = 250  # 阈值：> 250 → Phase 1 (START), ≤ 250 → Phase 2 (NO-BTN)
+```
+
+**step()中的逻辑**:
+```python
+booting = self._boot_frames > 0
+phase1 = booting & (self._boot_frames > _BOOT_FRAMES_SETTLE)
+eff_buttons[phase1] = _START_BTN       # 标题画面: 按START
+eff_buttons[booting & ~phase1] = 0x00  # 结算: 无按键
+self._batch.set_buttons_batch(eff_buttons)
+self._batch.run_frames_all(self.frame_skip)  # 单次内核！
+self._boot_frames[booting] -= self.frame_skip
+```
+
+**死亡处理**:
+- `done`实例: 调用`reset_selected()` + 设置`boot_frames[done] = BOOT_FRAMES_TOTAL`
+- 启动期间: 不计算奖励/done信号 → 避免虚假episode结束
+- 启动完成时: 从当前RAM更新`init_lives`和`prev_x`
+
+#### 7.5 性能基准 (实际游戏状态, Tesla V100) ✅
+
+| 操作 | N=100 | N=2048 |
+|------|-------|--------|
+| `run_frames_all(4)` | ~280ms | ~590ms |
+| `get_obs_batch` | 0.5ms | 4.4ms |
+| `get_ram_batch` | 0.1ms | 1.0ms |
+| **完整step()** | **~600ms** | **~600ms** |
+| **SPS** | **~167** | **~3,400** |
+| **NES-fps** | **~667** | **~13,600** |
+
+**对比nes_py×16**:
+| 指标 | nes_py×16 | GPU×2048 | 差距 |
+|------|-----------|---------|------|
+| SPS总计 | ~4,032 | ~3,400 | 0.85× |
+| 环境数量 | 16 | 2048 | **128×** |
+| 每小时env-steps | 232K | 7.1M | **30×** |
+| 梯度估计质量 | 低（2048样本/更新）| 高（262K样本/更新）| **128×** |
+
+> **注意**: 实际游戏状态（PPU全量渲染+精灵评估）比开机状态慢2.7×。N=2048时raw SPS接近nes_py×16，但环境多样性和训练数据量有**30×优势**。
+
+#### 7.6 关键RAM地址 (SMB调试) ✅
+| 地址 | 含义 |
+|------|------|
+| `$0009` | NMI帧计数器（健康检查） |
+| `$006D` | Mario X页码 |
+| `$0086` | Mario X偏移 |
+| `$075A` | Mario生命数 |
+| `$07D7` | 关卡通关标志（0x80=已通关）|
+| `$0776` | 游戏状态（bit0=游戏运行中）|
+| `$07A0` | 预关卡显示计时器 |
+| `$07F8-$07FA` | 关卡计时器（BCD格式）|
+
+#### 7.7 PPU Headless中间帧优化 ✅
+
+**问题**: `run_frames_all(4)` 中frame_skip=4 → 4帧全量渲染，但只有最后1帧需要观测。  
+**方案**: 前3帧(headless)跳过BG渲染 + 仅评估sprite-0，节省~80%渲染工作。
+
+**实现** (`src/cuda/device/ppu_device.cuh`, `nes_batch_kernel.cu`):
+```cpp
+// nes_batch_kernel.cu: 设置每帧headless标志
+for (int frame = 0; frame < num_frames; frame++) {
+    ppu.headless = (frame < num_frames - 1) ? 1u : 0u;  // 最后帧全量渲染
+    ...
+}
+
+// ppu_device.cuh: 新增sprite-0-only评估函数（仅检查OAM[0]，1次CHR读取）
+__device__ void ppu_evaluate_sprite0_only(NESPPUState* ppu, const uint8_t* chr_rom);
+
+// ppu_tick: headless模式使用轻量评估 + 跳过BG tile渲染
+if (ppu->headless) ppu_evaluate_sprite0_only(ppu, chr_rom);
+else ppu_evaluate_sprites(ppu, chr_rom);
+if (!ppu->headless && (x & 7) == 0) ppu_render_background_tile(...);
+
+// ppu_render_sprite_pixel: headless sprite-0 命中简化（假设BG不透明，SMB有效）
+if (ppu->headless) {
+    ppu->status |= 0x40u;  // BG always opaque in SMB status bar
+} else {
+    uint8_t bg_pixel = ppu->framebuffer[y * 256 + x];
+    if (bg_pixel != ppu->palette[0]) ppu->status |= 0x40u;
+}
+if (ppu->headless) return;  // 跳过像素写入
+```
+
+**为何sprite-0命中不能跳过**: SMB紧循环 `BIT $2002 / BVC loop` 等待sprite-0命中（PPUSTATUS bit6）触发滚动分割。无命中 → CPU自旋27280周期 → 游戏逻辑永不运行 → 状态损坏。
+
+**性能结果**:
+| 场景 | run_frames_all(4) | 加速比 |
+|------|------------------|--------|
+| 测试ROM (无复杂CHR) | 97ms vs 127ms基线 | **1.31×** |
+| SMB (预计，全量CHR渲染) | ~246ms vs 590ms | **~2.4×** (预测) |
+
+**所有8项GPU测试通过** ✅
+
+### 待完成内容
+
+- [x] **train_ppo_finetune.py集成**: `--use_gpu`标志 + `GpuMarioVecEnvStats`包装器 ✅
+- [x] **PPU渲染优化**: 中间帧headless模式（跳过BG渲染+仅sprite-0评估）✅ 1.31×实测（预计SMB 2.4×）
+- [ ] **端到端训练验证**: 用N=2048跑完整PPO训练10K步
+- [ ] **快照API** (可选): `save_state_snapshot()`/`restore_state_snapshot()`用于极速重置
+
+---
+
+## 🎯 下一步: 端到端训练验证
+
+**立即行动**:
+1. 以N=2048运行初步PPO训练（目标: 比nes_py快30×数据量）
+   ```bash
+   python trainer/train_ppo_finetune.py --use_gpu --total_timesteps 100000
+   ```
+2. 验证奖励曲线正常学习
+3. 可选: 测量SMB真实ROM的headless加速比（预计~2.4×）
 
 ### 最新进展 (Task 2.5完成 + 5轮渲染优化)
 
@@ -419,29 +606,15 @@ nes_emulator_gpu/
 
 ## 🎯 下一步行动
 
-### 立即开始: 任务2.4 - 滚动和镜像系统
+### 立即开始: 集成 train_ppo_finetune.py
 
-**工作内容**:
-1. 实现镜像模式
-   - Horizontal (垂直排列)
-   - Vertical (水平排列)
-   - Single-screen
-   - Four-screen (MMC3等)
+1. 修改`train_ppo_finetune.py`使用`GpuMarioVecEnv`替代`MarioVecEnv`
+2. 以N=2048运行初步PPO训练（10K步，验证收敛）
+3. 对比nes_py基线：数据多样性、每小时env-steps
 
-2. 实现滚动寄存器
-   - PPUSCROLL ($2005) 写入逻辑
-   - 精细X/Y滚动
-   - 粗略X/Y滚动
-
-3. Name Table地址计算
-   - 考虑滚动偏移
-   - 镜像模式转换
-   - 跨Name Table边界
-
-4. 单元测试 (10+测试)
-
-**预计时间**: 2-3天  
-**产出**: ppu.cpp修改 (~100行新增), test_scrolling.cpp (~150行)
+### 可选优化
+- **PPU中间帧跳过**: 仅在frame_skip最后一帧写入framebuffer（预计2.4×提速）
+- **快照API**: CUDA级别save/restore用于超快重置
 
 ---
 

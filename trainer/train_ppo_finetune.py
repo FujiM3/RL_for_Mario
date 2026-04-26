@@ -39,16 +39,17 @@ sys.path.insert(0, ROOT)
 
 from model.model_ppo_actor_critic import ActorCriticPPO
 from scripts.mario.mario_vec_env import MarioVecEnv
+from scripts.mario.gpu_vec_env import GpuMarioVecEnvStats
 from scripts.mario.curriculum import CurriculumScheduler
 from trainer.ppo_buffer import RolloutBuffer
 
 
 # ── 超参配置 ──────────────────────────────────────────────────────────────────
 
-def get_default_config() -> dict:
-    return {
+def get_default_config(use_gpu: bool = False) -> dict:
+    cfg = {
         # 环境
-        "num_envs":            16,
+        "num_envs":            2048 if use_gpu else 16,
         "rollout_steps":       2048,
         "total_timesteps":     10_000_000,   # 50M → 10M（DT预训练已收敛，不需要从零探索）
 
@@ -74,7 +75,7 @@ def get_default_config() -> dict:
         # Encoder 冻结策略
         "freeze_encoder_steps":  1_000_000,   # 前 100 万步冻结 encoder
 
-        # 课程学习
+        # 课程学习 (仅 CPU 模式；GPU 固定 World 1-1)
         "curriculum_threshold":  0.6,
         "curriculum_window":     200,
         "curriculum_min_eps":    500,
@@ -84,7 +85,11 @@ def get_default_config() -> dict:
         "out_dir":        "trainer/out/ppo_finetune",
         "save_interval":  50,      # 每 N 轮 rollout 保存一次
         "log_interval":   1,       # 每轮都打印
+
+        # GPU 模式标志
+        "use_gpu": use_gpu,
     }
+    return cfg
 
 
 # ── PPO Update ────────────────────────────────────────────────────────────────
@@ -235,13 +240,15 @@ class Logger:
 # ── 主训练循环 ────────────────────────────────────────────────────────────────
 
 def train(args):
-    cfg = get_default_config()
+    cfg = get_default_config(use_gpu=getattr(args, "use_gpu", False))
 
     # 命令行参数覆盖
     if args.num_envs:
         cfg["num_envs"] = args.num_envs
     if args.total_timesteps:
         cfg["total_timesteps"] = args.total_timesteps
+    if cfg["use_gpu"]:
+        cfg["out_dir"] = "trainer/out/ppo_finetune_gpu"
 
     # ── 设备 ─────────────────────────────────────────────────────────────────
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -288,10 +295,15 @@ def train(args):
         min_episodes=cfg["curriculum_min_eps"],
     )
 
-    venv = MarioVecEnv(
-        num_envs=cfg["num_envs"],
-        scheduler=curriculum,
-    )
+    if cfg["use_gpu"]:
+        print(f"[PPO] Using GPU environment: GpuMarioVecEnvStats (N={cfg['num_envs']})")
+        venv = GpuMarioVecEnvStats(num_envs=cfg["num_envs"])
+    else:
+        print(f"[PPO] Using CPU environment: MarioVecEnv (N={cfg['num_envs']})")
+        venv = MarioVecEnv(
+            num_envs=cfg["num_envs"],
+            scheduler=curriculum,
+        )
 
     # ── Buffer ───────────────────────────────────────────────────────────────
     buffer = RolloutBuffer(
@@ -386,8 +398,8 @@ def train(args):
         model.train()
         loss_info = ppo_update(model, optimizer, buffer, cfg, device)
 
-        # ── 课程调度 ──────────────────────────────────────────────────────────
-        phase_advanced = curriculum.try_advance()
+        # ── 课程调度 (CPU 模式；GPU 模式固定 World 1-1，仅统计 clear rate) ─────
+        phase_advanced = curriculum.try_advance() if not cfg["use_gpu"] else False
 
         # ── 日志 ─────────────────────────────────────────────────────────────
         rollout_count += 1
@@ -527,6 +539,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="PPO Fine-tune for Super Mario Bros")
     parser.add_argument("--resume",           type=str, default=None)
     parser.add_argument("--eval",             action="store_true")
+    parser.add_argument("--use_gpu",          action="store_true",
+                        help="Use GPU-accelerated GpuMarioVecEnv (default: CPU MarioVecEnv)")
     parser.add_argument("--num_envs",         type=int, default=None)
     parser.add_argument("--total_timesteps",  type=int, default=None)
     parser.add_argument("--world",            type=int, default=1)
