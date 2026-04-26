@@ -4,18 +4,22 @@
  * NES GPU State Structures
  *
  * Phase 3: Flat C-style structs for GPU device code.
- * Replaces OOP classes from Phase 2 reference implementation.
+ * Phase 5: SoA refactoring — all large arrays are now pointers.
  *
  * Design principles:
  * - No std::function (not allowed in CUDA device code)
  * - No virtual functions, no inheritance
- * - Fixed-size arrays only (no dynamic allocation)
+ * - Large arrays stored via pointers (pointed into SoA batch allocation)
  * - Compatible with both __host__ and __device__ code
  *
- * Memory per NES instance:
- *   CPU state:  ~2 KB  (registers + 2 KB RAM)
- *   PPU state:  ~248 KB (registers + VRAM + OAM + palette + framebuffer)
- *   Total:      ~250 KB
+ * Memory per NES instance (scalars only, Phase 5):
+ *   NESCPUState: ~40 bytes (registers + 2 pointers)
+ *   NESPPUState: ~80 bytes (registers + 5 pointers)
+ *   NESState total: ~120 bytes
+ *
+ * Large arrays managed by the batch host class (NESBatchGpu) or
+ * the single-instance host class (NESGpu). Array pointers must be
+ * set before calling ppu_reset / cpu_reset.
  */
 
 #include <stdint.h>
@@ -93,10 +97,10 @@ struct NESPPUState {
     // ---- Mirroring mode ----
     uint8_t  mirroring;   // One of MIRROR_* constants
 
-    // ---- PPU memory ----
-    uint8_t  vram[NES_VRAM_SIZE];           // 2 KB nametable VRAM
-    uint8_t  palette[NES_PALETTE_SIZE];     // 32-byte palette RAM
-    uint8_t  oam[NES_OAM_SIZE];             // 256-byte Object Attribute Memory
+    // ---- PPU memory (pointers into batch/single-instance allocation) ----
+    uint8_t*  vram;      // [NES_VRAM_SIZE]    2 KB nametable VRAM
+    uint8_t*  palette;   // [NES_PALETTE_SIZE] 32-byte palette RAM
+    uint8_t*  oam;       // [NES_OAM_SIZE]     256-byte Object Attribute Memory
 
     // ---- Output framebuffer (pointer to 256×240 palette-index buffer) ----
     // Framebuffer lives in a separate device allocation to reduce NESState size.
@@ -104,8 +108,8 @@ struct NESPPUState {
     // Use nes_get_framebuffer / nes_batch_get_framebuffers to get RGBA32 output.
     uint8_t* framebuffer;
 
-    // ---- Sprite rendering state (rebuilt each scanline) ----
-    ActiveSpriteGPU active_sprites[NES_MAX_SPRITES];
+    // ---- Sprite rendering state (pointer into batch allocation, [NES_MAX_SPRITES]) ----
+    ActiveSpriteGPU* active_sprites;
     int             active_sprite_count;
 
     // ---- Timing counters ----
@@ -129,8 +133,8 @@ struct NESCPUState {
     uint16_t PC;          // Program counter
     uint8_t  P;           // Processor status (NV_BDIZC)
 
-    // ---- 2 KB internal RAM ----
-    uint8_t  ram[NES_RAM_SIZE];
+    // ---- 2 KB internal RAM (pointer into batch/single-instance allocation) ----
+    uint8_t* ram;    // [NES_RAM_SIZE]
 
     // ---- Cycle tracking ----
     uint64_t total_cycles;

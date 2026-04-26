@@ -7,6 +7,7 @@
 
 #include "host/nes_gpu.h"
 #include "device/nes_state.h"
+#include "device/nes_batch_states_soa.h"
 
 #include <cuda_runtime.h>
 #include <cstring>
@@ -20,6 +21,12 @@ __global__ void nes_run_frame(NESState* state,
                                uint8_t* framebuf);
 
 __global__ void nes_reset(NESState* state,
+                           uint8_t* cpu_ram,
+                           uint8_t* ppu_vram,
+                           uint8_t* ppu_oam,
+                           uint8_t* ppu_palette,
+                           ActiveSpriteGPU* ppu_sprites,
+                           uint8_t mirroring,
                            const uint8_t* prg_rom, uint32_t prg_size,
                            const uint8_t* chr_rom, uint32_t chr_size);
 
@@ -57,11 +64,16 @@ NESGpu::NESGpu() {
 
 NESGpu::~NESGpu() {
     // Free device memory
-    if (d_state_)      cudaFree(d_state_);
-    if (d_prg_rom_)    cudaFree(d_prg_rom_);
-    if (d_chr_rom_)    cudaFree(d_chr_rom_);
-    if (d_fb_palette_) cudaFree(d_fb_palette_);
-    if (d_framebuf_)   cudaFree(d_framebuf_);
+    if (d_state_)       cudaFree(d_state_);
+    if (d_prg_rom_)     cudaFree(d_prg_rom_);
+    if (d_chr_rom_)     cudaFree(d_chr_rom_);
+    if (d_fb_palette_)  cudaFree(d_fb_palette_);
+    if (d_framebuf_)    cudaFree(d_framebuf_);
+    if (d_cpu_ram_)     cudaFree(d_cpu_ram_);
+    if (d_ppu_vram_)    cudaFree(d_ppu_vram_);
+    if (d_ppu_oam_)     cudaFree(d_ppu_oam_);
+    if (d_ppu_palette_) cudaFree(d_ppu_palette_);
+    if (d_ppu_sprites_) cudaFree(d_ppu_sprites_);
 
     // Free host memory
     delete[] h_framebuf_;
@@ -94,10 +106,27 @@ void NESGpu::load_rom(const uint8_t* prg_rom, uint32_t prg_size,
         CUDA_CHECK(cudaMemcpy(d_chr_rom_, chr_rom, chr_size, cudaMemcpyHostToDevice));
     }
 
-    // Allocate NES state
+    // Allocate NES state (scalars only with Phase 5 SoA)
     if (d_state_) { CUDA_CHECK(cudaFree(d_state_)); d_state_ = nullptr; }
     CUDA_CHECK(cudaMalloc(&d_state_, sizeof(NESState)));
     CUDA_CHECK(cudaMemset(d_state_, 0, sizeof(NESState)));
+
+    // Allocate large array buffers (zeroed; pointers set in reset kernel)
+    if (d_cpu_ram_)    { CUDA_CHECK(cudaFree(d_cpu_ram_));    d_cpu_ram_    = nullptr; }
+    if (d_ppu_vram_)   { CUDA_CHECK(cudaFree(d_ppu_vram_));   d_ppu_vram_   = nullptr; }
+    if (d_ppu_oam_)    { CUDA_CHECK(cudaFree(d_ppu_oam_));    d_ppu_oam_    = nullptr; }
+    if (d_ppu_palette_){ CUDA_CHECK(cudaFree(d_ppu_palette_)); d_ppu_palette_= nullptr; }
+    if (d_ppu_sprites_){ CUDA_CHECK(cudaFree(d_ppu_sprites_)); d_ppu_sprites_= nullptr; }
+    CUDA_CHECK(cudaMalloc(&d_cpu_ram_,    NES_RAM_SIZE));
+    CUDA_CHECK(cudaMalloc(&d_ppu_vram_,   NES_VRAM_SIZE));
+    CUDA_CHECK(cudaMalloc(&d_ppu_oam_,    NES_OAM_SIZE));
+    CUDA_CHECK(cudaMalloc(&d_ppu_palette_,NES_PALETTE_SIZE));
+    CUDA_CHECK(cudaMalloc(&d_ppu_sprites_,NES_MAX_SPRITES * sizeof(ActiveSpriteGPU)));
+    CUDA_CHECK(cudaMemset(d_cpu_ram_,    0, NES_RAM_SIZE));
+    CUDA_CHECK(cudaMemset(d_ppu_vram_,   0, NES_VRAM_SIZE));
+    CUDA_CHECK(cudaMemset(d_ppu_oam_,    0, NES_OAM_SIZE));
+    CUDA_CHECK(cudaMemset(d_ppu_palette_,0, NES_PALETTE_SIZE));
+    CUDA_CHECK(cudaMemset(d_ppu_sprites_,0, NES_MAX_SPRITES * sizeof(ActiveSpriteGPU)));
 
     // Allocate palette-index framebuffer (60KB) — separate from NESState
     if (d_fb_palette_) { CUDA_CHECK(cudaFree(d_fb_palette_)); d_fb_palette_ = nullptr; }
@@ -118,16 +147,9 @@ void NESGpu::load_rom(const uint8_t* prg_rom, uint32_t prg_size,
 void NESGpu::reset() {
     if (!loaded_) throw std::runtime_error("NESGpu::reset() called before load_rom()");
 
-    // Set mirroring in device state before reset kernel runs
-    // We do this by directly writing the mirroring field
-    // Offset of ppu within NESState = sizeof(NESCPUState)
-    uint8_t mir = mirroring_;
-    size_t ppu_offset = offsetof(NESState, ppu);
-    size_t mirror_offset = ppu_offset + offsetof(NESPPUState, mirroring);
-    CUDA_CHECK(cudaMemcpy(reinterpret_cast<uint8_t*>(d_state_) + mirror_offset,
-                          &mir, 1, cudaMemcpyHostToDevice));
-
-    nes_reset<<<1, 1>>>(d_state_, d_prg_rom_, prg_size_, d_chr_rom_, chr_size_);
+    nes_reset<<<1, 1>>>(d_state_, d_cpu_ram_, d_ppu_vram_, d_ppu_oam_, d_ppu_palette_,
+                         d_ppu_sprites_, mirroring_, d_prg_rom_, prg_size_,
+                         d_chr_rom_, chr_size_);
     CUDA_CHECK(cudaGetLastError());
     CUDA_CHECK(cudaDeviceSynchronize());
 

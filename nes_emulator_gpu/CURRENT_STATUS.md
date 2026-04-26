@@ -1,7 +1,7 @@
 # 🎯 NES GPU模拟器项目 - 当前状态
 
-**最后更新**: 2026-04-27 (Phase 4完成 + 帧缓冲指针优化)
-**当前阶段**: Phase 4 - GPU批量并行 ✅ 完成 → 下一步 Phase 5 Python API  
+**最后更新**: 2026-05-xx (Phase 5完成 - SoA重构, 1154×峰值加速)
+**当前阶段**: Phase 5 - SoA内存优化 ✅ 完成 → 下一步 Phase 6 Python API  
 **项目启动日期**: 2026-04-24
 
 ---
@@ -10,14 +10,15 @@
 
 ```
 Phase 0: 研究和准备        [██████████] 100% ✅ 完成
-Phase 1: CPU参考实现       [██████████] 100% ✅ 完成
+Phase 1: CPU参考实现       [██████████] 100% ✅ 完成 (73/73 tests)
 Phase 2: PPU参考实现       [██████████] 100% ✅ 完成 (136/136 tests)
 Phase 3: GPU单实例移植     [██████████] 100% ✅ 完成 (10/10 GPU tests)
-Phase 4: GPU批量并行       [██████████] 100% ✅ 完成 (~198× speedup, 120× target exceeded!)
-Phase 5: Python API        [          ]   0% ⏳
-Phase 6: PPO集成           [          ]   0% ⏳
+Phase 4: GPU批量并行       [██████████] 100% ✅ 完成 (~198× speedup @10K inst)
+Phase 5: SoA内存优化       [██████████] 100% ✅ 完成 (1154× peak, 18/18 tests)
+Phase 6: Python API        [          ]   0% ⏳
+Phase 7: PPO集成           [          ]   0% ⏳
 
-总体进度: 83% (Phase 0-4完成)
+总体进度: 83% (Phase 0-5完成)
 ```
 
 ---
@@ -190,13 +191,76 @@ Phase 6: PPO集成           [          ]   0% ⏳
 
 ---
 
-## 🎯 下一步: Phase 5 - Python API
+## ✅ Phase 5 已完成 - SoA内存优化
+
+**目标**: Structure-of-Arrays重构，改善GPU内存合并访问，达到1000实例120×加速  
+**实际时间**: ~1天  
+**最终进度**: 100% ✅ **目标大幅超越！**
+
+### 完成内容
+
+1. ✅ **AoS→SoA内存重构**
+   - `NESState`嵌入数组→指针 (4504B→~120B, 44×压缩)
+   - 新建`NESBatchStatesSoA`结构 (25个标量字段各有N元素数组)
+   - `soa_load/store_cpu/ppu`辅助函数实现完美合并访问
+
+2. ✅ **批量内核重写** (`nes_batch_kernel.cu`)
+   - `<<<N, 1>>>` → `<<<ceil(N/32), 32>>>` (完整warp利用率)
+   - Load-Process-Store模式：合并读取→运行帧→合并写回
+   - 大型数组(RAM/VRAM/OAM)通过指针直接访问（无额外拷贝）
+
+3. ✅ **主机API更新** (`nes_batch_gpu.h/cu`)
+   - `alloc_soa()`: 分配25个标量数组 + 6个大型数组 + 构建SoA结构体并上传device
+   - `get_state/set_state`: 逐字段cudaMemcpy（SoA gather/scatter）
+   - 完整的析构函数清理所有device内存
+
+4. ✅ **bug修复**: nes_reset镜像竞态条件
+   - 旧版：offsetof hack，kernel总是覆盖为MIRROR_HORIZONTAL
+   - 新版：mirroring作为参数传入，正确保留host设置的镜像模式
+
+5. ✅ **18/18 GPU测试全部通过**
+   - 10 single tests + 8 batch tests
+
+### 性能结果 (Tesla V100-PCIE-32GB)
+
+| 实例数 | SPS | 加速比 |
+|--------|-----|--------|
+| 1,000  | 31,215  | **123.9× ✅** |
+| 2,000  | 62,389  | 247.6×  |
+| 5,000  | 146,972 | 583.2×  |
+| 10,000 | 246,250 | 977.2×  |
+| **20,000** | **290,933** | **1154.5× 🏆** |
+| 40,000 | 118,261 | 469× (VRAM带宽饱和) |
+
+**峰值加速: 1154×（目标120×，超越9.6倍）**  
+**线性扩展区间: 1,000–10,000实例**  
+**峰值点: ~20,000实例（约1.3GB活跃framebuffer数据）**
+
+### 主要文件
+
+| 文件 | 内容 |
+|------|------|
+| `src/cuda/device/nes_batch_states_soa.h` | **新**: SoA结构体 + load/store辅助函数 |
+| `src/cuda/device/nes_state.h` | 嵌入数组→指针 (4504B→~120B) |
+| `src/cuda/kernels/nes_batch_kernel.cu` | 重写: SoA + 32线程块 |
+| `src/cuda/host/nes_batch_gpu.h/cu` | 重写: SoA分配管理 |
+| `src/cuda/kernels/nes_frame_kernel.cu` | nes_reset新签名(含数组指针+mirroring参数) |
+| `src/cuda/host/nes_gpu.h/cu` | 单实例路径更新: 5个独立数组缓冲区 |
+| `docs/SOA_REFACTORING_SUMMARY.md` | 详细优化文档 |
+
+---
+
+## 🎯 下一步: Phase 6 - Python API
 
 **目标**: 通过pybind11将NESBatchGpu暴露为Python接口，兼容gym环境格式
 
-**目标**: 实现完整的NES PPU (Picture Processing Unit)  
-**预计时间**: 3-4周  
-**当前进度**: 83% (Task 2.1-2.5完成)
+**需要实现**:
+1. `nes_batch_gpu_py.cpp` - pybind11绑定
+2. numpy framebuffer传输 (零拷贝 CUDA→numpy)
+3. `NESBatchEnv`类 兼容gym `step()`/`reset()`接口
+4. Python测试: 验证RL框架能直接调用
+
+---
 
 ### 最新进展 (Task 2.5完成 + 5轮渲染优化)
 

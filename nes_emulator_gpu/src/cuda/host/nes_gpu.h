@@ -21,6 +21,7 @@
 
 // Forward declarations (avoid including CUDA headers in .h)
 struct NESState;
+struct ActiveSpriteGPU;
 
 class NESGpu {
 public:
@@ -70,11 +71,18 @@ public:
 private:
     void cuda_check(int err, const char* file, int line);
 
-    NESState*  d_state_     = nullptr;  // Device: NES state (~4.5KB after optimization)
-    uint8_t*   d_prg_rom_   = nullptr;  // Device: PRG ROM
-    uint8_t*   d_chr_rom_   = nullptr;  // Device: CHR ROM
-    uint8_t*   d_fb_palette_ = nullptr; // Device: palette-index framebuffer (60KB)
-    uint32_t*  d_framebuf_  = nullptr;  // Device: RGBA32 output framebuffer
+    NESState*        d_state_     = nullptr;  // Device: NES state (scalars only, ~120B)
+    uint8_t*         d_prg_rom_   = nullptr;  // Device: PRG ROM
+    uint8_t*         d_chr_rom_   = nullptr;  // Device: CHR ROM
+    uint8_t*         d_fb_palette_ = nullptr; // Device: palette-index framebuffer (60KB)
+    uint32_t*        d_framebuf_  = nullptr;  // Device: RGBA32 output framebuffer
+
+    // ---- Large array allocations (pointed-to by d_state_ after reset) ----
+    uint8_t*         d_cpu_ram_      = nullptr;  // [NES_RAM_SIZE]
+    uint8_t*         d_ppu_vram_     = nullptr;  // [NES_VRAM_SIZE]
+    uint8_t*         d_ppu_oam_      = nullptr;  // [NES_OAM_SIZE]
+    uint8_t*         d_ppu_palette_  = nullptr;  // [NES_PALETTE_SIZE]
+    ActiveSpriteGPU* d_ppu_sprites_  = nullptr;  // [NES_MAX_SPRITES]
     uint32_t*  h_framebuf_  = nullptr;  // Host:   framebuffer staging
 
     uint32_t prg_size_ = 0;

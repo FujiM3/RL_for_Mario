@@ -24,7 +24,12 @@
 
 // Forward declarations for kernels
 __global__ void nes_run_frame(NESState*, const uint8_t*, uint32_t, const uint8_t*, uint32_t, uint8_t*);
-__global__ void nes_reset(NESState*, const uint8_t*, uint32_t, const uint8_t*, uint32_t);
+__global__ void nes_reset(NESState*,
+                           uint8_t* cpu_ram, uint8_t* ppu_vram, uint8_t* ppu_oam,
+                           uint8_t* ppu_palette, ActiveSpriteGPU* ppu_sprites,
+                           uint8_t mirroring,
+                           const uint8_t* prg_rom, uint32_t prg_size,
+                           const uint8_t* chr_rom, uint32_t chr_size);
 __global__ void nes_step_frames(NESState*, const uint8_t*, uint32_t, const uint8_t*, uint32_t, int, uint8_t*);
 __global__ void nes_get_framebuffer(const NESState* state, uint32_t* output);
 
@@ -104,11 +109,17 @@ static std::vector<uint8_t> make_test_chr_rom() {
 
 class GPUSingleTest : public ::testing::Test {
 protected:
-    NESState*  d_state  = nullptr;
-    uint8_t*   d_prg    = nullptr;
-    uint8_t*   d_chr    = nullptr;
-    uint8_t*   d_fb     = nullptr;  // palette-index framebuffer (separate from NESState)
-    NESState   h_state;
+    NESState*        d_state        = nullptr;
+    uint8_t*         d_prg          = nullptr;
+    uint8_t*         d_chr          = nullptr;
+    uint8_t*         d_fb           = nullptr;  // palette-index framebuffer
+    // Large array device buffers (pointed to by NESState)
+    uint8_t*         d_cpu_ram      = nullptr;
+    uint8_t*         d_ppu_vram     = nullptr;
+    uint8_t*         d_ppu_oam      = nullptr;
+    uint8_t*         d_ppu_palette  = nullptr;
+    ActiveSpriteGPU* d_ppu_sprites  = nullptr;
+    NESState         h_state;
 
     std::vector<uint8_t> prg_rom;
     std::vector<uint8_t> chr_rom;
@@ -130,27 +141,41 @@ protected:
         ASSERT_EQ(cudaMalloc(&d_chr, chr_rom.size()), cudaSuccess);
         ASSERT_EQ(cudaMalloc(&d_fb, NES_FRAMEBUFFER_SIZE), cudaSuccess);
 
+        // Allocate + zero array buffers (pointed to by NESState on device)
+        ASSERT_EQ(cudaMalloc(&d_cpu_ram,     NES_RAM_SIZE),                              cudaSuccess);
+        ASSERT_EQ(cudaMalloc(&d_ppu_vram,    NES_VRAM_SIZE),                             cudaSuccess);
+        ASSERT_EQ(cudaMalloc(&d_ppu_oam,     NES_OAM_SIZE),                              cudaSuccess);
+        ASSERT_EQ(cudaMalloc(&d_ppu_palette, NES_PALETTE_SIZE),                          cudaSuccess);
+        ASSERT_EQ(cudaMalloc(&d_ppu_sprites, NES_MAX_SPRITES * sizeof(ActiveSpriteGPU)), cudaSuccess);
+        ASSERT_EQ(cudaMemset(d_cpu_ram,     0, NES_RAM_SIZE),                              cudaSuccess);
+        ASSERT_EQ(cudaMemset(d_ppu_vram,    0, NES_VRAM_SIZE),                             cudaSuccess);
+        ASSERT_EQ(cudaMemset(d_ppu_oam,     0, NES_OAM_SIZE),                              cudaSuccess);
+        ASSERT_EQ(cudaMemset(d_ppu_palette, 0, NES_PALETTE_SIZE),                          cudaSuccess);
+        ASSERT_EQ(cudaMemset(d_ppu_sprites, 0, NES_MAX_SPRITES * sizeof(ActiveSpriteGPU)), cudaSuccess);
+
         ASSERT_EQ(cudaMemcpy(d_prg, prg_rom.data(), prg_rom.size(), cudaMemcpyHostToDevice), cudaSuccess);
         ASSERT_EQ(cudaMemcpy(d_chr, chr_rom.data(), chr_rom.size(), cudaMemcpyHostToDevice), cudaSuccess);
 
-        // Set mirroring = horizontal (SMB default)
-        uint8_t mir = MIRROR_HORIZONTAL;
-        size_t mirror_offset = offsetof(NESState, ppu) + offsetof(NESPPUState, mirroring);
-        ASSERT_EQ(cudaMemcpy(reinterpret_cast<uint8_t*>(d_state) + mirror_offset,
-                             &mir, 1, cudaMemcpyHostToDevice), cudaSuccess);
-
-        // Run reset
-        nes_reset<<<1, 1>>>(d_state, d_prg, (uint32_t)prg_rom.size(),
+        // Run reset (mirroring passed as parameter, no offsetof hack needed)
+        nes_reset<<<1, 1>>>(d_state,
+                             d_cpu_ram, d_ppu_vram, d_ppu_oam, d_ppu_palette, d_ppu_sprites,
+                             MIRROR_HORIZONTAL,
+                             d_prg, (uint32_t)prg_rom.size(),
                              d_chr, (uint32_t)chr_rom.size());
         ASSERT_EQ(cudaGetLastError(), cudaSuccess);
         ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
     }
 
     void TearDown() override {
-        if (d_state) cudaFree(d_state);
-        if (d_prg)   cudaFree(d_prg);
-        if (d_chr)   cudaFree(d_chr);
-        if (d_fb)    cudaFree(d_fb);
+        if (d_state)       cudaFree(d_state);
+        if (d_prg)         cudaFree(d_prg);
+        if (d_chr)         cudaFree(d_chr);
+        if (d_fb)          cudaFree(d_fb);
+        if (d_cpu_ram)     cudaFree(d_cpu_ram);
+        if (d_ppu_vram)    cudaFree(d_ppu_vram);
+        if (d_ppu_oam)     cudaFree(d_ppu_oam);
+        if (d_ppu_palette) cudaFree(d_ppu_palette);
+        if (d_ppu_sprites) cudaFree(d_ppu_sprites);
     }
 
     // Copy device state to host

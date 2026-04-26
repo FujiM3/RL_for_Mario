@@ -72,13 +72,30 @@ __global__ void nes_run_frame(NESState* state,
 // ---------------------------------------------------------------------------
 //
 // Call this once after copying ROM to device, before the first nes_run_frame.
+// Parameters:
+//   cpu_ram, ppu_vram, ppu_oam, ppu_palette, ppu_sprites: device memory for
+//   the large arrays (zeroed by caller); set as pointers in state before reset.
 // Grid/Block: <<<1,1>>>
 // ---------------------------------------------------------------------------
 __global__ void nes_reset(NESState* state,
+                           uint8_t* cpu_ram,
+                           uint8_t* ppu_vram,
+                           uint8_t* ppu_oam,
+                           uint8_t* ppu_palette,
+                           ActiveSpriteGPU* ppu_sprites,
+                           uint8_t mirroring,
                            const uint8_t* prg_rom, uint32_t prg_size,
                            const uint8_t* chr_rom, uint32_t chr_size) {
+    // Set array pointers BEFORE reset so ppu_reset/cpu_reset can clear them
+    state->cpu.ram            = cpu_ram;
+    state->ppu.vram           = ppu_vram;
+    state->ppu.oam            = ppu_oam;
+    state->ppu.palette        = ppu_palette;
+    state->ppu.active_sprites = ppu_sprites;
+    state->ppu.framebuffer    = nullptr;  // Set by run_frame kernel
+
     ppu_reset(&state->ppu);
-    state->ppu.mirroring = MIRROR_HORIZONTAL;  // Default; host can override before launch
+    state->ppu.mirroring = mirroring;
     cpu_reset(&state->cpu, &state->ppu, chr_rom, prg_rom, prg_size);
 }
 

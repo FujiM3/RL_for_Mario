@@ -25,7 +25,12 @@
 
 // Forward declarations for kernels
 __global__ void nes_run_frame(NESState*, const uint8_t*, uint32_t, const uint8_t*, uint32_t, uint8_t*);
-__global__ void nes_reset(NESState*, const uint8_t*, uint32_t, const uint8_t*, uint32_t);
+__global__ void nes_reset(NESState*,
+                           uint8_t* cpu_ram, uint8_t* ppu_vram, uint8_t* ppu_oam,
+                           uint8_t* ppu_palette, ActiveSpriteGPU* ppu_sprites,
+                           uint8_t mirroring,
+                           const uint8_t* prg_rom, uint32_t prg_size,
+                           const uint8_t* chr_rom, uint32_t chr_size);
 __global__ void nes_step_frames(NESState*, const uint8_t*, uint32_t, const uint8_t*, uint32_t, int, uint8_t*);
 
 // ---------------------------------------------------------------------------
@@ -103,27 +108,39 @@ int main(int argc, char** argv) {
     auto chr_rom = make_bench_chr_rom();
 
     // Allocate device memory
-    NESState* d_state;
-    uint8_t*  d_prg;
-    uint8_t*  d_chr;
-    uint8_t*  d_fb;
+    NESState*        d_state;
+    uint8_t*         d_prg;
+    uint8_t*         d_chr;
+    uint8_t*         d_fb;
+    uint8_t*         d_cpu_ram;
+    uint8_t*         d_ppu_vram;
+    uint8_t*         d_ppu_oam;
+    uint8_t*         d_ppu_palette;
+    ActiveSpriteGPU* d_ppu_sprites;
 
     CUDA_CHECK(cudaMalloc(&d_state, sizeof(NESState)));
     CUDA_CHECK(cudaMemset(d_state, 0, sizeof(NESState)));
     CUDA_CHECK(cudaMalloc(&d_prg, prg_rom.size()));
     CUDA_CHECK(cudaMalloc(&d_chr, chr_rom.size()));
     CUDA_CHECK(cudaMalloc(&d_fb, NES_FRAMEBUFFER_SIZE));
+    CUDA_CHECK(cudaMalloc(&d_cpu_ram,     NES_RAM_SIZE));
+    CUDA_CHECK(cudaMalloc(&d_ppu_vram,    NES_VRAM_SIZE));
+    CUDA_CHECK(cudaMalloc(&d_ppu_oam,     NES_OAM_SIZE));
+    CUDA_CHECK(cudaMalloc(&d_ppu_palette, NES_PALETTE_SIZE));
+    CUDA_CHECK(cudaMalloc(&d_ppu_sprites, NES_MAX_SPRITES * sizeof(ActiveSpriteGPU)));
+    CUDA_CHECK(cudaMemset(d_cpu_ram,     0, NES_RAM_SIZE));
+    CUDA_CHECK(cudaMemset(d_ppu_vram,    0, NES_VRAM_SIZE));
+    CUDA_CHECK(cudaMemset(d_ppu_oam,     0, NES_OAM_SIZE));
+    CUDA_CHECK(cudaMemset(d_ppu_palette, 0, NES_PALETTE_SIZE));
+    CUDA_CHECK(cudaMemset(d_ppu_sprites, 0, NES_MAX_SPRITES * sizeof(ActiveSpriteGPU)));
     CUDA_CHECK(cudaMemcpy(d_prg, prg_rom.data(), prg_rom.size(), cudaMemcpyHostToDevice));
     CUDA_CHECK(cudaMemcpy(d_chr, chr_rom.data(), chr_rom.size(), cudaMemcpyHostToDevice));
 
-    // Set mirroring
-    uint8_t mir = MIRROR_HORIZONTAL;
-    size_t mirror_offset = offsetof(NESState, ppu) + offsetof(NESPPUState, mirroring);
-    CUDA_CHECK(cudaMemcpy(reinterpret_cast<uint8_t*>(d_state) + mirror_offset,
-                          &mir, 1, cudaMemcpyHostToDevice));
-
-    // Reset
-    nes_reset<<<1, 1>>>(d_state, d_prg, (uint32_t)prg_rom.size(),
+    // Reset (mirroring passed as parameter)
+    nes_reset<<<1, 1>>>(d_state,
+                         d_cpu_ram, d_ppu_vram, d_ppu_oam, d_ppu_palette, d_ppu_sprites,
+                         MIRROR_HORIZONTAL,
+                         d_prg, (uint32_t)prg_rom.size(),
                          d_chr, (uint32_t)chr_rom.size());
     CUDA_CHECK(cudaGetLastError());
     CUDA_CHECK(cudaDeviceSynchronize());
@@ -163,11 +180,12 @@ int main(int argc, char** argv) {
     printf("--- Benchmark 2: Batched frame execution ---\n");
 
     // Reset again for consistent starting state
-    nes_reset<<<1, 1>>>(d_state, d_prg, (uint32_t)prg_rom.size(),
+    nes_reset<<<1, 1>>>(d_state,
+                         d_cpu_ram, d_ppu_vram, d_ppu_oam, d_ppu_palette, d_ppu_sprites,
+                         MIRROR_HORIZONTAL,
+                         d_prg, (uint32_t)prg_rom.size(),
                          d_chr, (uint32_t)chr_rom.size());
     CUDA_CHECK(cudaDeviceSynchronize());
-    CUDA_CHECK(cudaMemcpy(reinterpret_cast<uint8_t*>(d_state) + mirror_offset,
-                          &mir, 1, cudaMemcpyHostToDevice));
 
     CUDA_CHECK(cudaEventRecord(t_start));
     nes_step_frames<<<1, 1>>>(d_state, d_prg, (uint32_t)prg_rom.size(),
@@ -207,6 +225,11 @@ int main(int argc, char** argv) {
     cudaFree(d_prg);
     cudaFree(d_chr);
     cudaFree(d_fb);
+    cudaFree(d_cpu_ram);
+    cudaFree(d_ppu_vram);
+    cudaFree(d_ppu_oam);
+    cudaFree(d_ppu_palette);
+    cudaFree(d_ppu_sprites);
 
     return 0;
 }
